@@ -3,14 +3,14 @@
 CONFIG = {
     "project_name": "distil-logits",
     "dataset": {
-        "name": "mlabonne/FineTome-100k",
+        "name": "FreedomIntelligence/medical-o1-reasoning-SFT",
         "split": "train",
         # "num_samples": , # You can pass a number here to limit the number of samples to use.
         "seed": 42
     },
     "models": {
-        "teacher": "arcee-ai/Arcee-Spark",
-        "student": "Qwen/Qwen2-1.5B"
+        "teacher": "XformAI-india/Qwen3-1.7B-medicaldataset",
+        "student": "Qwen/Qwen3-0.6B"
     },
     "tokenizer": {
         "max_length":

@@ -1,0 +1,296 @@
+"""Evaluation script to compare original student model and distilled student model performance."""
+
+import json
+import logging
+import torch
+from datetime import datetime
+from pathlib import Path
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from tqdm import tqdm
+
+from config import CONFIG
+from data_processing import load_and_preprocess_dataset, prepare_dataset
+
+# Configure logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+def load_model_and_tokenizer(model_name, use_flash_attention=True):
+    """Load model and tokenizer."""
+    model_kwargs = {"torch_dtype": torch.bfloat16}
+    if use_flash_attention:
+        try:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        except Exception as e:
+            logger.warning(f"Flash attention not available: {e}, using default attention")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+
+    return model, tokenizer
+
+
+def compute_perplexity(model, tokenizer, dataset, max_samples=None, batch_size=8):
+    """Compute perplexity on a dataset."""
+    model.eval()
+    device = next(model.parameters()).device
+
+    total_loss = 0.0
+    total_tokens = 0
+
+    if max_samples:
+        dataset = dataset.select(range(min(max_samples, len(dataset))))
+
+    with torch.no_grad():
+        for i in tqdm(range(0, len(dataset), batch_size), desc="Computing perplexity"):
+            batch_end = min(i + batch_size, len(dataset))
+            batch = dataset[i:batch_end]
+
+            # Prepare inputs
+            input_ids = torch.tensor(batch['input_ids']).to(device)
+            attention_mask = torch.tensor(batch['attention_mask']).to(device)
+
+            # Forward pass
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
+            loss = outputs.loss
+
+            # Accumulate loss
+            batch_size_actual = input_ids.shape[0]
+            total_loss += loss.item() * batch_size_actual
+            total_tokens += batch_size_actual
+
+    avg_loss = total_loss / total_tokens
+    perplexity = torch.exp(torch.tensor(avg_loss)).item()
+
+    return perplexity, avg_loss
+
+
+def compute_model_size(model):
+    """Compute model size in MB."""
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_mb = (param_size + buffer_size) / 1024 / 1024
+    return size_mb
+
+
+def count_parameters(model):
+    """Count total and trainable parameters."""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    return total_params, trainable_params
+
+
+def generate_sample_outputs(model, tokenizer, prompts, max_length=256):
+    """Generate sample outputs from model."""
+    model.eval()
+    device = next(model.parameters()).device
+
+    outputs = []
+
+    with torch.no_grad():
+        for prompt in prompts:
+            # Tokenize prompt
+            inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+            # Generate
+            generated_ids = model.generate(**inputs,
+                                           max_length=max_length,
+                                           num_beams=1,
+                                           temperature=0.7,
+                                           top_p=0.9,
+                                           do_sample=True,
+                                           pad_token_id=tokenizer.eos_token_id)
+
+            # Decode
+            generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+            outputs.append({"prompt": prompt, "output": generated_text})
+
+    return outputs
+
+
+def evaluate_models(config):  # noqa: C901
+    """Main evaluation function."""
+    logger.info("Starting model evaluation...")
+
+    # Create results directory
+    results_dir = Path(config["training"]["output_dir"]) / "evaluation"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load dataset
+    logger.info("Loading dataset...")
+    dataset = load_and_preprocess_dataset(config)
+
+    # Load tokenizer
+    student_tokenizer = AutoTokenizer.from_pretrained(config["models"]["student"])
+    student_tokenizer.chat_template = config["tokenizer"]["chat_template"]
+
+    # Prepare dataset
+    logger.info("Preparing dataset...")
+    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config)
+    test_dataset = tokenized_dataset["test"]
+
+    # Initialize results dictionary
+    results = {
+        "timestamp": datetime.now().isoformat(),
+        "config": {
+            "teacher_model": config["models"]["teacher"],
+            "student_model": config["models"]["student"],
+            "distillation_temperature": config["distillation"]["temperature"],
+            "distillation_alpha": config["distillation"]["alpha"],
+        },
+        "models": {}
+    }
+
+    # Evaluate original student model
+    logger.info(f"Evaluating original student model: {config['models']['student']}")
+    try:
+        student_model, _ = load_model_and_tokenizer(
+            config["models"]["student"],
+            use_flash_attention=config["model_config"]["use_flash_attention"])
+
+        # Model info
+        total_params, trainable_params = count_parameters(student_model)
+        model_size = compute_model_size(student_model)
+
+        # Compute perplexity
+        logger.info("Computing perplexity for original student model...")
+        perplexity, avg_loss = compute_perplexity(student_model,
+                                                  student_tokenizer,
+                                                  test_dataset,
+                                                  max_samples=1000,
+                                                  batch_size=8)
+
+        results["models"]["original_student"] = {
+            "model_name": config["models"]["student"],
+            "total_parameters": int(total_params),
+            "trainable_parameters": int(trainable_params),
+            "model_size_mb": float(model_size),
+            "perplexity": float(perplexity),
+            "average_loss": float(avg_loss),
+        }
+
+        logger.info(
+            f"Original student model - Perplexity: {perplexity:.4f}, Size: {model_size:.2f}MB")
+
+        del student_model
+        torch.cuda.empty_cache()
+
+    except Exception as e:
+        logger.error(f"Error evaluating original student model: {e}")
+        results["models"]["original_student"] = {"error": str(e)}
+
+    # Evaluate distilled student model
+    distilled_model_path = config["training"]["output_dir"]
+    if Path(distilled_model_path).exists():
+        logger.info(f"Evaluating distilled student model: {distilled_model_path}")
+        try:
+            distilled_model, _ = load_model_and_tokenizer(
+                distilled_model_path,
+                use_flash_attention=config["model_config"]["use_flash_attention"])
+
+            # Model info
+            total_params, trainable_params = count_parameters(distilled_model)
+            model_size = compute_model_size(distilled_model)
+
+            # Compute perplexity
+            logger.info("Computing perplexity for distilled student model...")
+            perplexity, avg_loss = compute_perplexity(distilled_model,
+                                                      student_tokenizer,
+                                                      test_dataset,
+                                                      max_samples=1000,
+                                                      batch_size=8)
+
+            results["models"]["distilled_student"] = {
+                "model_path": distilled_model_path,
+                "total_parameters": int(total_params),
+                "trainable_parameters": int(trainable_params),
+                "model_size_mb": float(model_size),
+                "perplexity": float(perplexity),
+                "average_loss": float(avg_loss),
+            }
+
+            logger.info(
+                f"Distilled student model - Perplexity: {perplexity:.4f}, Size: {model_size:.2f}MB")
+
+            del distilled_model
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Error evaluating distilled student model: {e}")
+            results["models"]["distilled_student"] = {"error": str(e)}
+    else:
+        logger.warning(f"Distilled model not found at {distilled_model_path}")
+        results["models"]["distilled_student"] = {
+            "error": f"Model not found at {distilled_model_path}"
+        }
+
+    # Compute comparison metrics
+    if "original_student" in results["models"] and "distilled_student" in results["models"]:
+        if "error" not in results["models"]["original_student"] and "error" not in results[
+                "models"]["distilled_student"]:
+            original_ppl = results["models"]["original_student"]["perplexity"]
+            distilled_ppl = results["models"]["distilled_student"]["perplexity"]
+
+            results["comparison"] = {
+                "perplexity_improvement": float(
+                    (original_ppl - distilled_ppl) / original_ppl * 100),
+                "perplexity_ratio": float(distilled_ppl / original_ppl),
+                "original_perplexity": float(original_ppl),
+                "distilled_perplexity": float(distilled_ppl),
+            }
+
+            logger.info(
+                f"Perplexity improvement: {results['comparison']['perplexity_improvement']:.2f}%")
+
+    # Save results
+    results_file = results_dir / f"evaluation_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
+
+    logger.info(f"Evaluation results saved to {results_file}")
+
+    # Print summary
+    logger.info("\n" + "=" * 50)
+    logger.info("EVALUATION SUMMARY")
+    logger.info("=" * 50)
+
+    if "original_student" in results["models"] and "error" not in results["models"][
+            "original_student"]:
+        logger.info("Original Student Model:")
+        logger.info(f"  - Perplexity: {results['models']['original_student']['perplexity']:.4f}")
+        logger.info(
+            f"  - Model Size: {results['models']['original_student']['model_size_mb']:.2f}MB")
+        logger.info(
+            f"  - Parameters: {results['models']['original_student']['total_parameters']:,}")
+
+    if "distilled_student" in results["models"] and "error" not in results["models"][
+            "distilled_student"]:
+        logger.info("Distilled Student Model:")
+        logger.info(f"  - Perplexity: {results['models']['distilled_student']['perplexity']:.4f}")
+        logger.info(
+            f"  - Model Size: {results['models']['distilled_student']['model_size_mb']:.2f}MB")
+        logger.info(
+            f"  - Parameters: {results['models']['distilled_student']['total_parameters']:,}")
+
+    if "comparison" in results:
+        logger.info("Comparison:")
+        logger.info(
+            f"  - Perplexity Improvement: {results['comparison']['perplexity_improvement']:.2f}%")
+        logger.info(f"  - Perplexity Ratio: {results['comparison']['perplexity_ratio']:.4f}")
+
+    logger.info("=" * 50)
+
+    return results
+
+
+if __name__ == "__main__":
+    results = evaluate_models(CONFIG)
