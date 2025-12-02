@@ -1,4 +1,5 @@
 import os
+
 os.environ['HF_HOME'] = 'cache'
 
 from datasets import load_dataset
@@ -165,13 +166,15 @@ def selective_log_softmax(logits, index):
         per_token_logps = []
         for row_logits, row_labels in zip(logits, index):  # loop to reduce peak mem consumption
             row_logps = F.log_softmax(row_logits, dim=-1)
-            row_per_token_logps = row_logps.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
+            row_per_token_logps = row_logps.gather(dim=-1,
+                                                   index=row_labels.unsqueeze(-1)).squeeze(-1)
             per_token_logps.append(row_per_token_logps)
         per_token_logps = torch.stack(per_token_logps)
     return per_token_logps
 
 
 class DPOTrainerWithKD(DPOTrainer):
+
     def __init__(
         self,
         model,
@@ -181,7 +184,11 @@ class DPOTrainerWithKD(DPOTrainer):
         processing_class,
         peft_config,
     ):
-        super().__init__(model=model, args=args, train_dataset=train_dataset, processing_class=processing_class, peft_config=peft_config)
+        super().__init__(model=model,
+                         args=args,
+                         train_dataset=train_dataset,
+                         processing_class=processing_class,
+                         peft_config=peft_config)
         self.teacher_model = teacher_model  # Teacher model will be used for KD
 
     def distillation_loss(self, student_logits, teacher_logits, temperature=1.0):
@@ -199,18 +206,19 @@ class DPOTrainerWithKD(DPOTrainer):
         student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
 
         # KL Divergence loss
-        loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean') * (temperature ** 2)
+        loss = F.kl_div(student_log_probs, teacher_probs, reduction='batchmean') * (temperature**2)
         return loss
-    
+
     def response_distillation_loss(self, student_chosen_logps, teacher_chosen_logps):
         """Distillation loss at the response level"""
         # Encourage similar likelihood assignments
         return F.mse_loss(student_chosen_logps, teacher_chosen_logps.detach())
-    
+
     def compute_ref_log_probs(self, batch: dict[str, torch.LongTensor]) -> dict:
         """Computes log probabilities of the reference model for a single padded batch of a DPO specific dataset."""
         device_type = "xpu" if is_torch_xpu_available() else "cuda"
-        compte_ref_context_manager = amp.autocast(device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
+        compte_ref_context_manager = amp.autocast(
+            device_type) if self._peft_has_been_casted_to_bf16 else nullcontext()
         with torch.no_grad(), compte_ref_context_manager:
             if self.ref_model is None:
                 with self.null_ref_context():
@@ -218,7 +226,7 @@ class DPOTrainerWithKD(DPOTrainer):
             else:
                 ref_model_output, _ = self.concatenated_forward(self.ref_model, batch)
         return ref_model_output["chosen_logps"], ref_model_output["rejected_logps"]
-    
+
     def get_batch_loss_metrics(
         self,
         model,
@@ -228,13 +236,14 @@ class DPOTrainerWithKD(DPOTrainer):
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
 
-        teacher_output, teacher_logits = self.concatenated_forward(self.teacher_model.eval(), batch, no_grad=True)
+        teacher_output, teacher_logits = self.concatenated_forward(self.teacher_model.eval(),
+                                                                   batch,
+                                                                   no_grad=True)
         model_output, logits = self.concatenated_forward(model, batch)
 
         logit_kd_loss = self.distillation_loss(logits, teacher_logits)
 
         # resp_kd_loss = self.response_distillation_loss(model_output["chosen_logps"], teacher_output["chosen_logps"])
-
 
         # if ref_chosen_logps and ref_rejected_logps in batch use them, otherwise use the reference model
         if "ref_chosen_logps" in batch and "ref_rejected_logps" in batch:
@@ -243,13 +252,15 @@ class DPOTrainerWithKD(DPOTrainer):
         else:
             ref_chosen_logps, ref_rejected_logps = self.compute_ref_log_probs(batch)
 
-        losses, chosen_rewards, rejected_rewards = self.dpo_loss(
-            model_output["chosen_logps"], model_output["rejected_logps"], ref_chosen_logps, ref_rejected_logps
-        )
+        losses, chosen_rewards, rejected_rewards = self.dpo_loss(model_output["chosen_logps"],
+                                                                 model_output["rejected_logps"],
+                                                                 ref_chosen_logps,
+                                                                 ref_rejected_logps)
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
 
         if self.args.rpo_alpha is not None:
-            losses = losses + self.args.rpo_alpha * model_output["nll_loss"]  # RPO loss from V3 of the paper
+            losses = losses + self.args.rpo_alpha * model_output[
+                "nll_loss"]  # RPO loss from V3 of the paper
 
         if self.use_weighting:
             losses = losses * model_output["policy_weights"]
@@ -260,45 +271,45 @@ class DPOTrainerWithKD(DPOTrainer):
         losses = losses + logit_kd_loss * 0.001
 
         prefix = "eval_" if train_eval == "eval" else ""
-        metrics[f"{prefix}rewards/chosen"] = self.accelerator.gather_for_metrics(chosen_rewards).mean().item()
-        metrics[f"{prefix}rewards/rejected"] = self.accelerator.gather_for_metrics(rejected_rewards).mean().item()
-        metrics[f"{prefix}rewards/accuracies"] = self.accelerator.gather_for_metrics(reward_accuracies).mean().item()
+        metrics[f"{prefix}rewards/chosen"] = self.accelerator.gather_for_metrics(
+            chosen_rewards).mean().item()
+        metrics[f"{prefix}rewards/rejected"] = self.accelerator.gather_for_metrics(
+            rejected_rewards).mean().item()
+        metrics[f"{prefix}rewards/accuracies"] = self.accelerator.gather_for_metrics(
+            reward_accuracies).mean().item()
         metrics[f"{prefix}rewards/margins"] = (
-            self.accelerator.gather_for_metrics(chosen_rewards - rejected_rewards).mean().item()
-        )
-        metrics[f"{prefix}logps/chosen"] = (
-            self.accelerator.gather_for_metrics(model_output["chosen_logps"]).detach().mean().item()
-        )
-        metrics[f"{prefix}logps/rejected"] = (
-            self.accelerator.gather_for_metrics(model_output["rejected_logps"]).detach().mean().item()
-        )
-        metrics[f"{prefix}logits/chosen"] = (
-            self.accelerator.gather_for_metrics(model_output["mean_chosen_logits"]).detach().mean().item()
-        )
-        metrics[f"{prefix}logits/rejected"] = (
-            self.accelerator.gather_for_metrics(model_output["mean_rejected_logits"]).detach().mean().item()
-        )
+            self.accelerator.gather_for_metrics(chosen_rewards - rejected_rewards).mean().item())
+        metrics[f"{prefix}logps/chosen"] = (self.accelerator.gather_for_metrics(
+            model_output["chosen_logps"]).detach().mean().item())
+        metrics[f"{prefix}logps/rejected"] = (self.accelerator.gather_for_metrics(
+            model_output["rejected_logps"]).detach().mean().item())
+        metrics[f"{prefix}logits/chosen"] = (self.accelerator.gather_for_metrics(
+            model_output["mean_chosen_logits"]).detach().mean().item())
+        metrics[f"{prefix}logits/rejected"] = (self.accelerator.gather_for_metrics(
+            model_output["mean_rejected_logits"]).detach().mean().item())
 
         metrics[f"{prefix}logits/kd"] = (
-            self.accelerator.gather_for_metrics(logit_kd_loss).detach().mean().item()
-        )
+            self.accelerator.gather_for_metrics(logit_kd_loss).detach().mean().item())
 
         # metrics[f"{prefix}response/kd"] = (
         #     self.accelerator.gather_for_metrics(resp_kd_loss).detach().mean().item()
         # )
 
         if self.args.rpo_alpha is not None:
-            metrics[f"{prefix}nll_loss"] = (
-                self.accelerator.gather_for_metrics(model_output["nll_loss"]).detach().mean().item()
-            )
+            metrics[f"{prefix}nll_loss"] = (self.accelerator.gather_for_metrics(
+                model_output["nll_loss"]).detach().mean().item())
         if self.aux_loss_enabled:
-            metrics[f"{prefix}aux_loss"] = (
-                self.accelerator.gather_for_metrics(model_output["aux_loss"]).detach().mean().item()
-            )
+            metrics[f"{prefix}aux_loss"] = (self.accelerator.gather_for_metrics(
+                model_output["aux_loss"]).detach().mean().item())
 
         return losses.mean(), metrics
-    
-    def concatenated_forward(self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]], no_grad=False):
+
+    def concatenated_forward(  # noqa: C901
+        self,
+        model: nn.Module,
+        batch: dict[str, Union[list, torch.LongTensor]],
+        no_grad=False,
+    ):
         """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
 
         We do this to avoid doing two forward passes, because it's faster for FSDP.
@@ -352,18 +363,17 @@ class DPOTrainerWithKD(DPOTrainer):
             # Truncate right
             if self.max_length is not None:
                 if self.truncation_mode == "keep_end":
-                    input_ids = input_ids[:, -self.max_length :]
-                    attention_mask = attention_mask[:, -self.max_length :]
-                    loss_mask = loss_mask[:, -self.max_length :]
+                    input_ids = input_ids[:, -self.max_length:]
+                    attention_mask = attention_mask[:, -self.max_length:]
+                    loss_mask = loss_mask[:, -self.max_length:]
                 elif self.truncation_mode == "keep_start":
-                    input_ids = input_ids[:, : self.max_length]
-                    attention_mask = attention_mask[:, : self.max_length]
-                    loss_mask = loss_mask[:, : self.max_length]
+                    input_ids = input_ids[:, :self.max_length]
+                    attention_mask = attention_mask[:, :self.max_length]
+                    loss_mask = loss_mask[:, :self.max_length]
                 else:
                     raise ValueError(
                         f"Unknown truncation mode: '{self.truncation_mode}'. Should be one of ['keep_end', "
-                        "'keep_start']."
-                    )
+                        "'keep_start'].")
 
             if self.use_logits_to_keep:
                 # Compute logits_to_keep based on loss_mask pattern:
@@ -371,7 +381,8 @@ class DPOTrainerWithKD(DPOTrainer):
                 #  [0, 0, 0, x, x, x, 0]]
                 #         ^ start computing logits from here ([:, -(7-3+1):])
                 first_compute_index = loss_mask.nonzero(as_tuple=True)[1].min()
-                logits_to_keep = (loss_mask.shape[1] - first_compute_index).item() + 1  # +1 for the first label
+                logits_to_keep = (loss_mask.shape[1] -
+                                  first_compute_index).item() + 1  # +1 for the first label
                 model_kwargs["logits_to_keep"] = logits_to_keep
 
             if self.padding_free:
@@ -384,7 +395,6 @@ class DPOTrainerWithKD(DPOTrainer):
                 model_kwargs["position_ids"] = position_ids
             else:
                 model_kwargs["attention_mask"] = attention_mask
-
 
             if no_grad:
                 with torch.no_grad():
@@ -421,9 +431,10 @@ class DPOTrainerWithKD(DPOTrainer):
         if self.padding_free:
             # Unflatten the per_token_logps (shape: [1, sum_seq_len] -> [batch_size, seq_len])
             batch_size, seq_len = attention_mask.shape
-            per_token_logps_ = torch.zeros(
-                batch_size, seq_len, device=outputs.logits.device, dtype=outputs.logits.dtype
-            )
+            per_token_logps_ = torch.zeros(batch_size,
+                                           seq_len,
+                                           device=outputs.logits.device,
+                                           dtype=outputs.logits.dtype)
             per_token_logps_[attention_mask.bool()] = per_token_logps
             per_token_logps = per_token_logps_
 
@@ -435,12 +446,14 @@ class DPOTrainerWithKD(DPOTrainer):
             with torch.no_grad():
                 # Eq (2) of the WPO paper: https://huggingface.co/papers/2406.11827
                 logprobs = F.log_softmax(logits, dim=-1)
-                weights_adjustment_factor = torch.logsumexp(2 * logprobs, dim=-1)  # same as sum(probs**2) in log space
+                weights_adjustment_factor = torch.logsumexp(
+                    2 * logprobs, dim=-1)  # same as sum(probs**2) in log space
                 per_token_logps_adjusted = per_token_logps - weights_adjustment_factor
                 all_weights = (per_token_logps_adjusted * loss_mask).sum(-1) / loss_mask.sum(-1)
                 chosen_weights = all_weights[:num_examples]
                 rejected_weights = all_weights[num_examples:]
-                output["policy_weights"] = torch.clamp(torch.exp(chosen_weights + rejected_weights), max=1)
+                output["policy_weights"] = torch.clamp(torch.exp(chosen_weights + rejected_weights),
+                                                       max=1)
 
         if self.args.rpo_alpha is not None:
             # Only use the chosen logits for the RPO loss
@@ -448,9 +461,9 @@ class DPOTrainerWithKD(DPOTrainer):
             chosen_labels = labels[:num_examples]
 
             # Compute the log probabilities of the labels
-            output["nll_loss"] = F.cross_entropy(
-                torch.flatten(chosen_logits, end_dim=1), torch.flatten(chosen_labels, end_dim=1), ignore_index=0
-            )
+            output["nll_loss"] = F.cross_entropy(torch.flatten(chosen_logits, end_dim=1),
+                                                 torch.flatten(chosen_labels, end_dim=1),
+                                                 ignore_index=0)
 
         if self.loss_type == "ipo":
             all_logps = all_logps / loss_mask.sum(-1)
@@ -504,6 +517,7 @@ def chatml_format(example, tokenizer):
         "rejected": rejected,
     }
 
+
 # load + shuffle
 ds = load_dataset(cfg["dataset"]["name"], split=cfg["dataset"]["split"])
 ds = ds.shuffle(seed=cfg["dataset"]["seed"])
@@ -526,16 +540,11 @@ tok_teacher.pad_token = tok_student.eos_token
 tok_teacher.padding_side = cfg["tokenizer"]["pad_side"]
 
 # mapping dataset to chatML format
-train_ds = train_ds.map(
-    lambda ex: chatml_format(ex, tok_student),
-    remove_columns=train_ds.column_names
-)
+train_ds = train_ds.map(lambda ex: chatml_format(ex, tok_student),
+                        remove_columns=train_ds.column_names)
 if val_ds:
-    val_ds = val_ds.map(
-        lambda ex: chatml_format(ex, tok_student),
-        remove_columns=val_ds.column_names
-)
-    
+    val_ds = val_ds.map(lambda ex: chatml_format(ex, tok_student),
+                        remove_columns=val_ds.column_names)
 
 bnb_cfg = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -552,50 +561,46 @@ lora_cfg = LoraConfig(
     target_modules=cfg["lora"]["target_modules"],
 )
 
-student_model = AutoModelForCausalLM.from_pretrained(
-    cfg["models"]["student"], quantization_config=bnb_cfg
-)
-student_model.config.use_cache = False        # required for gradient-checkpointing
+student_model = AutoModelForCausalLM.from_pretrained(cfg["models"]["student"],
+                                                     quantization_config=bnb_cfg)
+student_model.config.use_cache = False  # required for gradient-checkpointing
 
-teacher_model = AutoModelForCausalLM.from_pretrained(
-    cfg["models"]["teacher"], quantization_config=bnb_cfg
-)
-teacher_model.eval()                          # we never train the teacher
-
+teacher_model = AutoModelForCausalLM.from_pretrained(cfg["models"]["teacher"],
+                                                     quantization_config=bnb_cfg)
+teacher_model.eval()  # we never train the teacher
 
 train_cfg = DPOConfig(
-    per_device_train_batch_size = cfg["dpo"]["per_device_batch"],
-    gradient_accumulation_steps = cfg["dpo"]["grad_accum"],
-    num_train_epochs = cfg["dpo"]["num_train_epochs"],
-    learning_rate = cfg["dpo"]["lr"],
-    logging_steps = cfg["dpo"]["logging_steps"],
-    save_steps = cfg["dpo"]["save_steps"],
-    output_dir = cfg["paths"]["output_dir"],
-    bf16 = True,
+    per_device_train_batch_size=cfg["dpo"]["per_device_batch"],
+    gradient_accumulation_steps=cfg["dpo"]["grad_accum"],
+    num_train_epochs=cfg["dpo"]["num_train_epochs"],
+    learning_rate=cfg["dpo"]["lr"],
+    logging_steps=cfg["dpo"]["logging_steps"],
+    save_steps=cfg["dpo"]["save_steps"],
+    output_dir=cfg["paths"]["output_dir"],
+    bf16=True,
     # report_to = "wandb",
 )
 
 trainer = DPOTrainerWithKD(
-    model            = student_model,
-    teacher_model    = teacher_model,
-    args             = train_cfg,
-    train_dataset    = train_ds,
+    model=student_model,
+    teacher_model=teacher_model,
+    args=train_cfg,
+    train_dataset=train_ds,
     # eval_dataset     = val_ds,
-    processing_class = tok_student,    # your trainer expects tokenizer here
-    peft_config      = lora_cfg,
+    processing_class=tok_student,  # your trainer expects tokenizer here
+    peft_config=lora_cfg,
     # max_length, truncation_mode, etc. come from your custom class attributes
 )
 
 trainer.train()
 
-
 trainer.model.save_pretrained(cfg["paths"]["output_dir"])
 tok_student.save_pretrained(cfg["paths"]["output_dir"])
 
 # ─ merge LoRA into full-precision base model ─
-base_fp16 = AutoModelForCausalLM.from_pretrained(
-    cfg["models"]["student"], torch_dtype=torch.float16, return_dict=True
-)
+base_fp16 = AutoModelForCausalLM.from_pretrained(cfg["models"]["student"],
+                                                 torch_dtype=torch.float16,
+                                                 return_dict=True)
 merged = PeftModel.from_pretrained(base_fp16, cfg["paths"]["output_dir"])
 merged = merged.merge_and_unload()
 merged.save_pretrained(cfg["paths"]["final_merged"])
@@ -603,4 +608,5 @@ tok_student.save_pretrained(cfg["paths"]["final_merged"])
 
 # tidy-up
 del trainer, student_model, teacher_model, merged
-gc.collect(); torch.cuda.empty_cache()
+gc.collect()
+torch.cuda.empty_cache()
