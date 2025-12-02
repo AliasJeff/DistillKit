@@ -19,4 +19,4 @@ repos:
         additional_dependencies:
           - flake8
 
-default_install_hook_types: [pre-commit, pre-push, pre-merge-commit]
+default_install_hook_types: [pre-commit, pre-merge-commit]
