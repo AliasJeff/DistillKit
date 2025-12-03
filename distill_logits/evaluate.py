@@ -151,8 +151,11 @@ def compute_f1(predictions, references):
     try:
         f1_scores = []
         for pred, ref in zip(predictions, references):
+            ref_text = ref[0]
+
             pred_tokens = pred.lower().split()
-            ref_tokens = ref.split()
+            ref_tokens = ref_text.lower().split()
+
             f1 = _f1_score(pred_tokens, ref_tokens)
             f1_scores.append(f1)
 
