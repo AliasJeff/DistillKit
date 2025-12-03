@@ -41,18 +41,14 @@ def sharegpt_format(example, student_tokenizer, config):
     return {"text": text}
 
 
-def freedom_intelligence_format(example, student_tokenizer, config):
+def freedom_intelligence_format(example, student_tokenizer, config, mode="train"):
     """Convert FreedomIntelligence format to chat template format."""
     # Question, Complex_CoT, Response
-    message = [{
-        "role": "user",
-        "content": example['Question']
-    }, {
-        "role": "assistant",
-        "content": example['Response']
-    }]
+    messages = [{"role": "user", "content": example['Question']}]
+    if mode == "train":
+        messages.append({"role": "assistant", "content": example['Response']})
 
-    text = student_tokenizer.apply_chat_template(message,
+    text = student_tokenizer.apply_chat_template(messages,
                                                  tokenize=False,
                                                  add_generation_prompt=True)
     return {"text": text}
@@ -66,12 +62,12 @@ def tokenize_function(examples, student_tokenizer, config):
                              padding="max_length")
 
 
-def prepare_dataset(dataset, student_tokenizer, config):
+def prepare_dataset(dataset, student_tokenizer, config, mode="train"):
     """Prepare dataset by formatting and tokenizing."""
     logger.info("Formatting dataset with FreedomIntelligence format...")
 
     # Format dataset
-    dataset = dataset.map(lambda x: freedom_intelligence_format(x, student_tokenizer, config),
+    dataset = dataset.map(lambda x: freedom_intelligence_format(x, student_tokenizer, config, mode),
                           desc="Formatting FreedomIntelligence dataset")
     logger.info("Dataset formatting complete")
 
@@ -85,7 +81,8 @@ def prepare_dataset(dataset, student_tokenizer, config):
 
     # Split into train and test
     logger.info("Splitting dataset into train/test (90/10)...")
-    tokenized_dataset = tokenized_dataset.train_test_split(test_size=0.1)
+    tokenized_dataset = tokenized_dataset.train_test_split(test_size=0.1,
+                                                           seed=config["dataset"]["seed"])
     logger.info(
         f"Dataset split complete: train={len(tokenized_dataset['train'])}, test={len(tokenized_dataset['test'])}"
     )

@@ -3,6 +3,7 @@
 import json
 import logging
 import torch
+import math
 from datetime import datetime
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -44,33 +45,35 @@ def compute_perplexity(model, tokenizer, dataset, max_samples=None, stride=512):
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
+    max_pos = model.config.max_position_embeddings
+
     with torch.no_grad():
-        for sample in tqdm(dataset, desc="Computing perplexity"):
-
+        for sample in tqdm(dataset):
             input_ids = torch.tensor(sample["input_ids"], dtype=torch.long).to(device)
-
             seq_len = input_ids.size(0)
 
             for i in range(0, seq_len, stride):
-                begin = max(i + stride - model.config.max_position_embeddings, 0)
-                end = min(i + stride, seq_len)
-                trg_len = end - i
+                begin = max(i - max_pos, 0)
+                end = i + stride
+                end = min(end, seq_len)
 
                 input_chunk = input_ids[begin:end].unsqueeze(0)
-                target_chunk = input_chunk.clone()
+                labels = input_chunk.clone()
 
-                target_chunk[:, :-trg_len] = -100  # ignore loss
+                overlap = i - begin
+                labels[:, :overlap] = -100
 
-                outputs = model(input_chunk, labels=target_chunk)
-                neg_log_likelihood = outputs.loss * trg_len
+                outputs = model(input_chunk, labels=labels)
+                loss = outputs.loss
+                valid_tokens = (labels != -100).sum().item()
 
-                total_nll += neg_log_likelihood.item()
-                total_tokens += trg_len
+                total_nll += loss.item() * valid_tokens
+                total_tokens += valid_tokens
 
     avg_loss = total_nll / total_tokens
-    perplexity = torch.exp(torch.tensor(avg_loss)).item()
+    ppl = math.exp(avg_loss)
 
-    return perplexity, avg_loss
+    return ppl, avg_loss
 
 
 def compute_model_size(model):
@@ -167,11 +170,11 @@ def compute_f1(predictions, references):
 
 
 def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=256):
-    """Generate predictions from model on dataset samples."""
     model.eval()
     device = next(model.parameters()).device
 
-    MAX_INPUT_LENGTH = 4096 - max_length
+    max_context = model.config.max_position_embeddings
+    max_input_len = max_context - max_length
 
     predictions = []
     references = []
@@ -185,25 +188,26 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
 
                 ref_text = sample["Response"]
 
-                # Get input and reference
                 input_ids = torch.tensor(sample["input_ids"],
                                          dtype=torch.long).unsqueeze(0).to(device)
-                if input_ids.size(1) > MAX_INPUT_LENGTH:
-                    input_ids = input_ids[:, :MAX_INPUT_LENGTH]
 
-                # Generate
-                generated_ids = model.generate(input_ids,
-                                               max_new_tokens=MAX_INPUT_LENGTH,
-                                               num_beams=1,
-                                               temperature=0.7,
-                                               top_p=0.9,
-                                               do_sample=True,
-                                               pad_token_id=tokenizer.eos_token_id)
+                # truncate input
+                input_ids = input_ids[:, :max_input_len]
 
-                # Decode prediction
-                pred_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                # generate output tokens only
+                generated_ids = model.generate(
+                    input_ids,
+                    max_new_tokens=max_length,
+                    num_beams=1,
+                    do_sample=False,  # deterministic for evaluation
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+                # decode only the generated part
+                pred_tokens = generated_ids[0][input_ids.size(1):]
+                pred_text = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+
                 predictions.append(pred_text)
-
                 references.append(ref_text)
 
             except Exception as e:
@@ -231,7 +235,7 @@ def evaluate_models(config):  # noqa: C901
 
     # Prepare dataset
     logger.info("Preparing dataset...")
-    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config)
+    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config, mode="test")
     test_dataset = tokenized_dataset["test"]
 
     # Initialize results dictionary
