@@ -111,7 +111,7 @@ def compute_bleu(predictions, references):
             references = [[ref] for ref in references]
 
         bleu = BLEU()
-        score = bleu.corpus_score(predictions, [references])
+        score = bleu.corpus_score(predictions, references)
         return float(score.score)
     except Exception as e:
         logger.warning(f"Error computing BLEU score: {e}")
@@ -152,7 +152,7 @@ def compute_f1(predictions, references):
         f1_scores = []
         for pred, ref in zip(predictions, references):
             pred_tokens = pred.lower().split()
-            ref_tokens = ref.lower().split()
+            ref_tokens = ref.split()
             f1 = _f1_score(pred_tokens, ref_tokens)
             f1_scores.append(f1)
 
