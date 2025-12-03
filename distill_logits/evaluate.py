@@ -29,7 +29,7 @@ def load_model_and_tokenizer(model_name, use_flash_attention=True):
             logger.warning(f"Flash attention not available: {e}, using default attention")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", **model_kwargs)
 
     return model, tokenizer
 
@@ -165,6 +165,8 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
     model.eval()
     device = next(model.parameters()).device
 
+    MAX_INPUT_LENGTH = 4096 - max_length
+
     predictions = []
     references = []
 
@@ -180,10 +182,13 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
                 # Get input and reference
                 input_ids = torch.tensor(sample["input_ids"],
                                          dtype=torch.long).unsqueeze(0).to(device)
+                if input_ids.size(1) > MAX_INPUT_LENGTH:
+                    input_ids = input_ids[:, :MAX_INPUT_LENGTH]
 
                 # Generate
                 generated_ids = model.generate(input_ids,
                                                max_length=max_length,
+                                               max_new_tokens=MAX_INPUT_LENGTH,
                                                num_beams=1,
                                                temperature=0.7,
                                                top_p=0.9,
