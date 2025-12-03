@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
+from sacrebleu import BLEU
+from collections import Counter
 
 from config import CONFIG
 from data_processing import load_and_preprocess_dataset, prepare_dataset
@@ -32,36 +34,40 @@ def load_model_and_tokenizer(model_name, use_flash_attention=True):
     return model, tokenizer
 
 
-def compute_perplexity(model, tokenizer, dataset, max_samples=None, batch_size=8):
-    """Compute perplexity on a dataset."""
+def compute_perplexity(model, tokenizer, dataset, max_samples=None, stride=512):
     model.eval()
     device = next(model.parameters()).device
 
-    total_loss = 0.0
+    total_nll = 0.0
     total_tokens = 0
 
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
     with torch.no_grad():
-        for i in tqdm(range(0, len(dataset), batch_size), desc="Computing perplexity"):
-            batch_end = min(i + batch_size, len(dataset))
-            batch = dataset[i:batch_end]
+        for sample in tqdm(dataset, desc="Computing perplexity"):
 
-            # Prepare inputs
-            input_ids = torch.tensor(batch['input_ids']).to(device)
-            attention_mask = torch.tensor(batch['attention_mask']).to(device)
+            input_ids = torch.tensor(sample["input_ids"], dtype=torch.long).to(device)
 
-            # Forward pass
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
-            loss = outputs.loss
+            seq_len = input_ids.size(0)
 
-            # Accumulate loss
-            batch_size_actual = input_ids.shape[0]
-            total_loss += loss.item() * batch_size_actual
-            total_tokens += batch_size_actual
+            for i in range(0, seq_len, stride):
+                begin = max(i + stride - model.config.max_position_embeddings, 0)
+                end = min(i + stride, seq_len)
+                trg_len = end - i
 
-    avg_loss = total_loss / total_tokens
+                input_chunk = input_ids[begin:end].unsqueeze(0)
+                target_chunk = input_chunk.clone()
+
+                target_chunk[:, :-trg_len] = -100  # ignore loss
+
+                outputs = model(input_chunk, labels=target_chunk)
+                neg_log_likelihood = outputs.loss * trg_len
+
+                total_nll += neg_log_likelihood.item()
+                total_tokens += trg_len
+
+    avg_loss = total_nll / total_tokens
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
 
     return perplexity, avg_loss
@@ -117,6 +123,71 @@ def generate_sample_outputs(model, tokenizer, prompts, max_length=256):
     return outputs
 
 
+def compute_bleu(predictions, references):
+    """Compute BLEU score.
+    
+    Args:
+        predictions: List of predicted texts
+        references: List of reference texts (or list of lists for multiple references)
+    
+    Returns:
+        BLEU score (0-100)
+    """
+    try:
+        # Ensure references is in the correct format
+        if references and not isinstance(references[0], list):
+            references = [[ref] for ref in references]
+
+        bleu = BLEU()
+        score = bleu.corpus_score(predictions, [references])
+        return float(score.score)
+    except Exception as e:
+        logger.warning(f"Error computing BLEU score: {e}")
+        return 0.0
+
+
+def compute_f1(predictions, references):
+    """Compute F1 score based on token overlap.
+    
+    Args:
+        predictions: List of predicted texts
+        references: List of reference texts
+    
+    Returns:
+        Average F1 score
+    """
+
+    def _f1_score(pred_tokens, ref_tokens):
+        """Compute F1 score for a single prediction-reference pair."""
+        common = Counter(pred_tokens) & Counter(ref_tokens)
+        num_same = sum(common.values())
+
+        if len(pred_tokens) == 0 or len(ref_tokens) == 0:
+            return int(pred_tokens == ref_tokens)
+
+        if num_same == 0:
+            return 0.0
+
+        precision = num_same / len(pred_tokens)
+        recall = num_same / len(ref_tokens)
+        f1 = 2 * (precision * recall) / (precision + recall)
+        return f1
+
+    try:
+        f1_scores = []
+        for pred, ref in zip(predictions, references):
+            pred_tokens = pred.lower().split()
+            ref_tokens = ref.lower().split()
+            f1 = _f1_score(pred_tokens, ref_tokens)
+            f1_scores.append(f1)
+
+        avg_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+        return float(avg_f1)
+    except Exception as e:
+        logger.warning(f"Error computing F1 score: {e}")
+        return 0.0
+
+
 def evaluate_models(config):  # noqa: C901
     """Main evaluation function."""
     logger.info("Starting model evaluation...")
@@ -166,8 +237,7 @@ def evaluate_models(config):  # noqa: C901
         perplexity, avg_loss = compute_perplexity(student_model,
                                                   student_tokenizer,
                                                   test_dataset,
-                                                  max_samples=1000,
-                                                  batch_size=8)
+                                                  max_samples=500)
 
         results["models"]["original_student"] = {
             "model_name": config["models"]["student"],
@@ -206,8 +276,7 @@ def evaluate_models(config):  # noqa: C901
             perplexity, avg_loss = compute_perplexity(distilled_model,
                                                       student_tokenizer,
                                                       test_dataset,
-                                                      max_samples=1000,
-                                                      batch_size=8)
+                                                      max_samples=500)
 
             results["models"]["distilled_student"] = {
                 "model_path": distilled_model_path,

@@ -4,6 +4,7 @@ safetensors
 transformers==4.51.3
 trl
 hf_transfer
+sacrebleu
 
 # Development and linting tools
 yapf==0.40.2
