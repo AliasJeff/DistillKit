@@ -223,7 +223,7 @@ def test_model_outputs(model_path, num_samples=10, compare_original=False, outpu
         model_path: Path to the model to test
         num_samples: Number of test samples to generate
         compare_original: Whether to compare with original student model
-        output_file: Optional file to save results
+        output_file: Optional file to save results (auto-generated if not provided)
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
@@ -233,6 +233,11 @@ def test_model_outputs(model_path, num_samples=10, compare_original=False, outpu
     logger.info("\n" + "=" * 70)
     logger.info("MODEL OUTPUT TEST")
     logger.info("=" * 70)
+
+    # Generate default output filename if not provided
+    if not output_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"test_results_{timestamp}.json"
 
     test_results = {
         "timestamp": datetime.now().isoformat(),
@@ -356,11 +361,13 @@ def test_model_outputs(model_path, num_samples=10, compare_original=False, outpu
             logger.info(f"  - Original model avg time: {original_time:.3f}s")
             logger.info(f"  - Speedup ratio: {speedup:.2f}x")
 
-    # Save results if requested
-    if output_file:
+    # Save results
+    try:
         with open(output_file, 'w') as f:
             json.dump(test_results, f, indent=2)
         logger.info(f"\nTest results saved to {output_file}")
+    except Exception as e:
+        logger.error(f"Error saving test results to {output_file}: {e}")
 
     logger.info("=" * 70 + "\n")
 
