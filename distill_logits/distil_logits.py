@@ -227,8 +227,10 @@ def main():
         logger.info("Using flash attention 2")
 
     teacher_model = AutoModelForCausalLM.from_pretrained(config["models"]["teacher"],
+                                                         device_map="auto",
                                                          **model_kwargs)
     student_model = AutoModelForCausalLM.from_pretrained(config["models"]["student"],
+                                                         device_map="auto",
                                                          **model_kwargs)
     logger.info("Models loaded successfully")
 

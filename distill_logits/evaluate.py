@@ -95,34 +95,6 @@ def count_parameters(model):
     return total_params, trainable_params
 
 
-def generate_sample_outputs(model, tokenizer, prompts, max_length=512):
-    """Generate sample outputs from model."""
-    model.eval()
-    device = next(model.parameters()).device
-
-    outputs = []
-
-    with torch.no_grad():
-        for prompt in prompts:
-            # Tokenize prompt
-            inputs = tokenizer(prompt, return_tensors="pt").to(device)
-
-            # Generate
-            generated_ids = model.generate(**inputs,
-                                           max_length=max_length,
-                                           num_beams=1,
-                                           temperature=0.7,
-                                           top_p=0.9,
-                                           do_sample=True,
-                                           pad_token_id=tokenizer.eos_token_id)
-
-            # Decode
-            generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            outputs.append({"prompt": prompt, "output": generated_text})
-
-    return outputs
-
-
 def compute_bleu(predictions, references):
     """Compute BLEU score.
     
@@ -202,6 +174,9 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
     with torch.no_grad():
         for sample in tqdm(dataset, desc="Generating predictions"):
             try:
+
+                ref_text = sample["Response"]
+
                 # Get input and reference
                 input_ids = torch.tensor(sample["input_ids"],
                                          dtype=torch.long).unsqueeze(0).to(device)
@@ -219,8 +194,6 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
                 pred_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
                 predictions.append(pred_text)
 
-                # Use input as reference (or you can extract from dataset if available)
-                ref_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
                 references.append(ref_text)
 
             except Exception as e:

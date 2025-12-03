@@ -69,11 +69,9 @@ def tokenize_function(examples, student_tokenizer, config):
 def prepare_dataset(dataset, student_tokenizer, config):
     """Prepare dataset by formatting and tokenizing."""
     logger.info("Formatting dataset with FreedomIntelligence format...")
-    original_columns = dataset.column_names
 
     # Format dataset
     dataset = dataset.map(lambda x: freedom_intelligence_format(x, student_tokenizer, config),
-                          remove_columns=original_columns,
                           desc="Formatting FreedomIntelligence dataset")
     logger.info("Dataset formatting complete")
 
