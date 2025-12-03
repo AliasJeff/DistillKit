@@ -129,6 +129,9 @@ def compute_f1(predictions, references):
         Average F1 score
     """
 
+    if references and not isinstance(references[0], list):
+        references = [[ref] for ref in references]
+
     def _f1_score(pred_tokens, ref_tokens):
         """Compute F1 score for a single prediction-reference pair."""
         common = Counter(pred_tokens) & Counter(ref_tokens)
@@ -187,7 +190,6 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
 
                 # Generate
                 generated_ids = model.generate(input_ids,
-                                               max_length=max_length,
                                                max_new_tokens=MAX_INPUT_LENGTH,
                                                num_beams=1,
                                                temperature=0.7,
