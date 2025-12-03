@@ -216,7 +216,12 @@ def generate_command(args):
         sys.exit(1)
 
 
-def test_model_outputs(model_path, num_samples=10, compare_original=False, output_file=None):
+def test_model_outputs(  # noqa: C901
+        model_path,
+        num_samples=10,
+        compare_original=False,
+        output_file=None,
+):
     """Test model outputs with various metrics.
     
     Args:
@@ -229,6 +234,7 @@ def test_model_outputs(model_path, num_samples=10, compare_original=False, outpu
     import torch
     import json
     from datetime import datetime
+    from data_processing import load_and_preprocess_dataset
 
     logger.info("\n" + "=" * 70)
     logger.info("MODEL OUTPUT TEST")
@@ -246,14 +252,22 @@ def test_model_outputs(model_path, num_samples=10, compare_original=False, outpu
         "models": {}
     }
 
-    # Test prompts covering different domains
-    test_prompts = [
-        "What is artificial intelligence?", "Explain the concept of machine learning",
-        "How does deep learning work?", "What are neural networks?",
-        "Describe the training process of models", "What is natural language processing?",
-        "Explain transfer learning", "What are transformers in AI?",
-        "How do attention mechanisms work?", "What is fine-tuning in machine learning?"
-    ][:num_samples]
+    # Load test prompts from dataset
+    logger.info("Loading test prompts from dataset...")
+    dataset = load_and_preprocess_dataset(CONFIG)
+    # Extract questions from the dataset
+    test_prompts = []
+    for i, example in enumerate(dataset):
+        if i >= num_samples:
+            break
+        # Extract the question from the example
+        if 'Question' in example:
+            test_prompts.append(example['Question'])
+        elif 'text' in example:
+            # Fallback: use the text field if Question is not available
+            test_prompts.append(example['text'][:200])
+
+    logger.info(f"Loaded {len(test_prompts)} test prompts from dataset")
 
     def test_single_model(model_name, model_path_to_load):
         """Test a single model."""
