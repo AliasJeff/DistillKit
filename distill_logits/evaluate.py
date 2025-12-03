@@ -95,7 +95,7 @@ def count_parameters(model):
     return total_params, trainable_params
 
 
-def generate_sample_outputs(model, tokenizer, prompts, max_length=256):
+def generate_sample_outputs(model, tokenizer, prompts, max_length=512):
     """Generate sample outputs from model."""
     model.eval()
     device = next(model.parameters()).device
@@ -188,6 +188,48 @@ def compute_f1(predictions, references):
         return 0.0
 
 
+def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=256):
+    """Generate predictions from model on dataset samples."""
+    model.eval()
+    device = next(model.parameters()).device
+
+    predictions = []
+    references = []
+
+    if max_samples:
+        dataset = dataset.select(range(min(max_samples, len(dataset))))
+
+    with torch.no_grad():
+        for sample in tqdm(dataset, desc="Generating predictions"):
+            try:
+                # Get input and reference
+                input_ids = torch.tensor(sample["input_ids"],
+                                         dtype=torch.long).unsqueeze(0).to(device)
+
+                # Generate
+                generated_ids = model.generate(input_ids,
+                                               max_length=max_length,
+                                               num_beams=1,
+                                               temperature=0.7,
+                                               top_p=0.9,
+                                               do_sample=True,
+                                               pad_token_id=tokenizer.eos_token_id)
+
+                # Decode prediction
+                pred_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                predictions.append(pred_text)
+
+                # Use input as reference (or you can extract from dataset if available)
+                ref_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                references.append(ref_text)
+
+            except Exception as e:
+                logger.warning(f"Error generating prediction: {e}")
+                continue
+
+    return predictions, references
+
+
 def evaluate_models(config):  # noqa: C901
     """Main evaluation function."""
     logger.info("Starting model evaluation...")
@@ -237,7 +279,18 @@ def evaluate_models(config):  # noqa: C901
         perplexity, avg_loss = compute_perplexity(student_model,
                                                   student_tokenizer,
                                                   test_dataset,
-                                                  max_samples=500)
+                                                  max_samples=100)
+
+        # Generate predictions for F1 and BLEU
+        logger.info("Generating predictions for F1 and BLEU scores...")
+        predictions, references = generate_predictions(student_model,
+                                                       student_tokenizer,
+                                                       test_dataset,
+                                                       max_samples=100)
+
+        # Compute F1 and BLEU
+        f1_score = compute_f1(predictions, references)
+        bleu_score = compute_bleu(predictions, references)
 
         results["models"]["original_student"] = {
             "model_name": config["models"]["student"],
@@ -246,10 +299,13 @@ def evaluate_models(config):  # noqa: C901
             "model_size_mb": float(model_size),
             "perplexity": float(perplexity),
             "average_loss": float(avg_loss),
+            "f1_score": float(f1_score),
+            "bleu_score": float(bleu_score),
         }
 
         logger.info(
-            f"Original student model - Perplexity: {perplexity:.4f}, Size: {model_size:.2f}MB")
+            f"Original student model - Perplexity: {perplexity:.4f}, F1: {f1_score:.4f}, BLEU: {bleu_score:.4f}, Size: {model_size:.2f}MB"
+        )
 
         del student_model
         torch.cuda.empty_cache()
@@ -276,7 +332,18 @@ def evaluate_models(config):  # noqa: C901
             perplexity, avg_loss = compute_perplexity(distilled_model,
                                                       student_tokenizer,
                                                       test_dataset,
-                                                      max_samples=500)
+                                                      max_samples=100)
+
+            # Generate predictions for F1 and BLEU
+            logger.info("Generating predictions for F1 and BLEU scores...")
+            predictions, references = generate_predictions(distilled_model,
+                                                           student_tokenizer,
+                                                           test_dataset,
+                                                           max_samples=100)
+
+            # Compute F1 and BLEU
+            f1_score = compute_f1(predictions, references)
+            bleu_score = compute_bleu(predictions, references)
 
             results["models"]["distilled_student"] = {
                 "model_path": distilled_model_path,
@@ -285,10 +352,13 @@ def evaluate_models(config):  # noqa: C901
                 "model_size_mb": float(model_size),
                 "perplexity": float(perplexity),
                 "average_loss": float(avg_loss),
+                "f1_score": float(f1_score),
+                "bleu_score": float(bleu_score),
             }
 
             logger.info(
-                f"Distilled student model - Perplexity: {perplexity:.4f}, Size: {model_size:.2f}MB")
+                f"Distilled student model - Perplexity: {perplexity:.4f}, F1: {f1_score:.4f}, BLEU: {bleu_score:.4f}, Size: {model_size:.2f}MB"
+            )
 
             del distilled_model
             torch.cuda.empty_cache()
@@ -336,6 +406,8 @@ def evaluate_models(config):  # noqa: C901
             "original_student"]:
         logger.info("Original Student Model:")
         logger.info(f"  - Perplexity: {results['models']['original_student']['perplexity']:.4f}")
+        logger.info(f"  - F1 Score: {results['models']['original_student']['f1_score']:.4f}")
+        logger.info(f"  - BLEU Score: {results['models']['original_student']['bleu_score']:.4f}")
         logger.info(
             f"  - Model Size: {results['models']['original_student']['model_size_mb']:.2f}MB")
         logger.info(
@@ -345,6 +417,8 @@ def evaluate_models(config):  # noqa: C901
             "distilled_student"]:
         logger.info("Distilled Student Model:")
         logger.info(f"  - Perplexity: {results['models']['distilled_student']['perplexity']:.4f}")
+        logger.info(f"  - F1 Score: {results['models']['distilled_student']['f1_score']:.4f}")
+        logger.info(f"  - BLEU Score: {results['models']['distilled_student']['bleu_score']:.4f}")
         logger.info(
             f"  - Model Size: {results['models']['distilled_student']['model_size_mb']:.2f}MB")
         logger.info(

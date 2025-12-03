@@ -49,11 +49,12 @@ class PeriodicTestCallback(TrainerCallback):
         self.num_test_samples = num_test_samples
         self.test_results = []
 
-    def on_step_end(self, args, state, control, **kwargs):
+    def on_step_end(self, args, state, control, **kwargs):  # noqa: C901
         """Called at the end of each training step."""
         if state.global_step % self.eval_steps == 0 and state.global_step > 0:
             model = kwargs.get('model')
-            if model is None:
+            tokenizer = kwargs.get('tokenizer')
+            if model is None or tokenizer is None:
                 return
 
             logger.info(f"\n{'='*70}")
@@ -63,7 +64,6 @@ class PeriodicTestCallback(TrainerCallback):
             try:
                 model.eval()
                 with torch.no_grad():
-                    # Sample test examples from the test dataset
                     import random
                     test_indices = random.sample(range(len(self.test_dataset)),
                                                  min(self.num_test_samples, len(self.test_dataset)))
@@ -78,24 +78,55 @@ class PeriodicTestCallback(TrainerCallback):
 
                         # Forward pass
                         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                        loss = outputs.loss if hasattr(outputs, 'loss') else None
+
+                        if isinstance(outputs, dict):
+                            loss = outputs.get("loss", None)
+                        else:
+                            loss = getattr(outputs, "loss", None)
 
                         if loss is not None:
-                            total_loss += loss.item()
+                            total_loss += float(loss.detach().cpu().item())
                             logger.info(
-                                f"  Sample {idx}/{self.num_test_samples}: Loss = {loss.item():.4f}")
+                                f"  Sample {idx}/{self.num_test_samples}: Loss = {loss:.4f}")
 
+                        decoded_input = tokenizer.decode(sample["input_ids"],
+                                                         skip_special_tokens=True)
+
+                        decoded_target = None
+                        if "labels" in sample:
+                            decoded_target = tokenizer.decode([
+                                t if t != -100 else tokenizer.pad_token_id for t in sample["labels"]
+                            ],
+                                                              skip_special_tokens=True)
+
+                        logger.info("\n------ Q&A Example ------")
+                        logger.info(f"Prompt:\n{decoded_input}")
+
+                        if decoded_target:
+                            logger.info(f"\nTarget:\n{decoded_target}")
+
+                        try:
+                            gen_output = model.generate(input_ids=input_ids,
+                                                        attention_mask=attention_mask,
+                                                        max_new_tokens=128)
+                            decoded_gen = tokenizer.decode(gen_output[0], skip_special_tokens=True)
+                            logger.info(f"\nModel Output:\n{decoded_gen}")
+                        except Exception as ge:
+                            logger.warning(f"Generation error: {ge}")
+
+                    # Average loss
                     avg_loss = total_loss / self.num_test_samples if self.num_test_samples > 0 else 0
                     logger.info(f"\nAverage Test Loss: {avg_loss:.4f}")
 
-                    # Store result
+                    # Save result
                     self.test_results.append({
-                        'step': state.global_step,
-                        'avg_loss': avg_loss,
-                        'timestamp': datetime.now().isoformat()
+                        "step": state.global_step,
+                        "avg_loss": avg_loss,
+                        "timestamp": datetime.now().isoformat()
                     })
 
                 model.train()
+
             except Exception as e:
                 logger.error(f"Error during periodic test evaluation: {e}", exc_info=True)
                 model.train()

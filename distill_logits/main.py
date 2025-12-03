@@ -186,7 +186,7 @@ def generate_samples(config, num_samples=5, prompts=None):
 
                 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                 generated_ids = model.generate(**inputs,
-                                               max_length=256,
+                                               max_length=512,
                                                num_beams=1,
                                                temperature=0.7,
                                                top_p=0.9,
@@ -294,7 +294,7 @@ def test_model_outputs(  # noqa: C901
 
                     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                     generated_ids = model.generate(**inputs,
-                                                   max_length=256,
+                                                   max_length=512,
                                                    num_beams=1,
                                                    temperature=0.7,
                                                    top_p=0.9,
