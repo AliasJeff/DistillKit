@@ -50,6 +50,13 @@ python main.py train --evaluate
 
 # Full pipeline: train, evaluate, and generate samples
 python main.py train --evaluate --generate-samples --num-samples 5
+
+# Train in background
+nohup python distil_logits.py > distill.log 2>&1 &
+# Check logs
+tail -f distill.log
+# Check process
+ps -ef | grep distil_logits.py
 ```
 
 ### 2. Evaluate Models

@@ -25,6 +25,8 @@ CONFIG = {
         "per_device_train_batch_size": 1,
         "gradient_accumulation_steps": 8,
         "save_steps": 1000,
+        "eval_steps": 300,  # Evaluate every 500 steps
+        "evaluation_strategy": "steps",  # Evaluate at specified intervals
         "logging_steps": 1,
         "learning_rate": 2e-5,
         "weight_decay": 0.05,

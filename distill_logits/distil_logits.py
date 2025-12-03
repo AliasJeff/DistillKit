@@ -4,7 +4,9 @@ import torch
 import torch.nn.functional as F
 from trl import SFTTrainer
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers.trainer_callback import TrainerCallback
 import yaml
+from datetime import datetime
 
 from config import CONFIG
 from data_processing import load_and_preprocess_dataset, prepare_dataset
@@ -27,6 +29,78 @@ def freeze_student_spectrum(model, unfrozen_layers_file, logger):
             param.requires_grad = True
 
     logger.info(f"Froze layers based on spectrum configuration: {unfrozen_layers_file}")
+
+
+class PeriodicTestCallback(TrainerCallback):
+    """Callback to run periodic test evaluation during training."""
+
+    def __init__(self, test_dataset, tokenizer, eval_steps=500, num_test_samples=5):
+        """Initialize the callback.
+        
+        Args:
+            test_dataset: The test dataset to evaluate on
+            tokenizer: The tokenizer to use for generation
+            eval_steps: Number of steps between evaluations
+            num_test_samples: Number of samples to test
+        """
+        self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
+        self.eval_steps = eval_steps
+        self.num_test_samples = num_test_samples
+        self.test_results = []
+
+    def on_step_end(self, args, state, control, **kwargs):
+        """Called at the end of each training step."""
+        if state.global_step % self.eval_steps == 0 and state.global_step > 0:
+            model = kwargs.get('model')
+            if model is None:
+                return
+
+            logger.info(f"\n{'='*70}")
+            logger.info(f"PERIODIC TEST EVALUATION - Step {state.global_step}")
+            logger.info(f"{'='*70}")
+
+            try:
+                model.eval()
+                with torch.no_grad():
+                    # Sample test examples from the test dataset
+                    import random
+                    test_indices = random.sample(range(len(self.test_dataset)),
+                                                 min(self.num_test_samples, len(self.test_dataset)))
+
+                    total_loss = 0
+                    for idx, sample_idx in enumerate(test_indices, 1):
+                        sample = self.test_dataset[sample_idx]
+
+                        # Prepare input
+                        input_ids = torch.tensor([sample['input_ids']]).to(model.device)
+                        attention_mask = torch.tensor([sample['attention_mask']]).to(model.device)
+
+                        # Forward pass
+                        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                        loss = outputs.loss if hasattr(outputs, 'loss') else None
+
+                        if loss is not None:
+                            total_loss += loss.item()
+                            logger.info(
+                                f"  Sample {idx}/{self.num_test_samples}: Loss = {loss.item():.4f}")
+
+                    avg_loss = total_loss / self.num_test_samples if self.num_test_samples > 0 else 0
+                    logger.info(f"\nAverage Test Loss: {avg_loss:.4f}")
+
+                    # Store result
+                    self.test_results.append({
+                        'step': state.global_step,
+                        'avg_loss': avg_loss,
+                        'timestamp': datetime.now().isoformat()
+                    })
+
+                model.train()
+            except Exception as e:
+                logger.error(f"Error during periodic test evaluation: {e}", exc_info=True)
+                model.train()
+
+            logger.info(f"{'='*70}\n")
 
 
 def pad_logits(student_logits, teacher_logits):
@@ -152,6 +226,15 @@ def main():
 
     # Add the teacher model to the trainer
     trainer.teacher_model = teacher_model
+
+    # Add periodic test evaluation callback
+    eval_steps = config["training"].get("eval_steps", 500)
+    test_callback = PeriodicTestCallback(test_dataset=tokenized_dataset["test"],
+                                         tokenizer=student_tokenizer,
+                                         eval_steps=eval_steps,
+                                         num_test_samples=5)
+    trainer.add_callback(test_callback)
+    logger.info(f"Added periodic test callback (every {eval_steps} steps)")
 
     # Train the model
     logger.info("Starting training...")
