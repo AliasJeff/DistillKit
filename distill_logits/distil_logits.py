@@ -9,7 +9,7 @@ import yaml
 from datetime import datetime
 
 from config import CONFIG
-from data_processing import load_and_preprocess_dataset, prepare_dataset
+from data_processing import load_dataset_split
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -197,11 +197,6 @@ def main():
     os.environ['WANDB_PROJECT'] = config["project_name"]
     logger.info(f"Project name: {config['project_name']}")
 
-    # Load and preprocess dataset
-    logger.info("Loading and preprocessing dataset...")
-    dataset = load_and_preprocess_dataset(config)
-    logger.info(f"Dataset loaded with {len(dataset)} samples")
-
     # Load tokenizers
     logger.info(
         f"Loading tokenizers: teacher={config['models']['teacher']}, student={config['models']['student']}"
@@ -212,12 +207,14 @@ def main():
     # Apply chat template to student tokenizer
     student_tokenizer.chat_template = config["tokenizer"]["chat_template"]
 
-    # Prepare and tokenize the dataset
-    logger.info("Preparing and tokenizing dataset...")
-    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config)
-    logger.info(
-        f"Tokenized dataset: train={len(tokenized_dataset['train'])}, test={len(tokenized_dataset['test'])}"
-    )
+    # Load train and test datasets (from cache if available, otherwise process)
+    logger.info("Loading train dataset...")
+    train_dataset = load_dataset_split(config, student_tokenizer, split="train")
+    logger.info(f"Train dataset loaded with {len(train_dataset)} samples")
+
+    logger.info("Loading test dataset...")
+    test_dataset = load_dataset_split(config, student_tokenizer, split="test")
+    logger.info(f"Test dataset loaded with {len(test_dataset)} samples")
 
     # Load models with configurable flash attention
     logger.info("Loading models...")
@@ -249,8 +246,8 @@ def main():
     logger.info("Creating trainer...")
     trainer = LogitsTrainer(
         model=student_model,
-        train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["test"],
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
         args=training_arguments,
     )
 
@@ -262,7 +259,7 @@ def main():
 
     # Add periodic test evaluation callback
     eval_steps = config["training"].get("eval_steps", 500)
-    test_callback = PeriodicTestCallback(test_dataset=tokenized_dataset["test"],
+    test_callback = PeriodicTestCallback(test_dataset=test_dataset,
                                          tokenizer=student_tokenizer,
                                          eval_steps=eval_steps,
                                          num_test_samples=5)

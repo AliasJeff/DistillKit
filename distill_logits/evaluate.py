@@ -190,6 +190,7 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
 
                 input_ids = torch.tensor(sample["input_ids"],
                                          dtype=torch.long).unsqueeze(0).to(device)
+                attention_mask = torch.tensor(sample["attention_mask"]).unsqueeze(0).to(device)
 
                 # truncate input
                 input_ids = input_ids[:, :max_input_len]
@@ -197,6 +198,7 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
                 # generate output tokens only
                 generated_ids = model.generate(
                     input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=max_length,
                     num_beams=1,
                     do_sample=False,  # deterministic for evaluation
