@@ -4,6 +4,7 @@ CONFIG = {
     "project_name": "distil-logits",
     "dataset": {
         "name": "FreedomIntelligence/medical-o1-reasoning-SFT",
+        "lang": "en",
         "split": "train",
         # "num_samples": , # You can pass a number here to limit the number of samples to use.
         "seed": 42
@@ -39,7 +40,7 @@ CONFIG = {
         "alpha": 0.5
     },
     "model_config": {
-        "use_flash_attention": True
+        "use_flash_attention": False
     }
     # "spectrum": {
     #     "layers_to_unfreeze": "/workspace/spectrum/snr_results_Qwen-Qwen2-1.5B_unfrozenparameters_50percent.yaml" # You can pass a spectrum yaml file here to freeze layers identified by spectrum.

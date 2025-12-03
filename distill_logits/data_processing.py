@@ -8,7 +8,9 @@ logger = logging.getLogger(__name__)
 
 def load_and_preprocess_dataset(config):
     """Load and preprocess dataset from configuration."""
-    dataset = load_dataset(config["dataset"]["name"], split=config["dataset"]["split"])
+    dataset = load_dataset(config["dataset"]["name"],
+                           config["dataset"]["lang"],
+                           split=config["dataset"]["split"])
     dataset = dataset.shuffle(seed=config["dataset"]["seed"])
     if "num_samples" in config["dataset"]:
         dataset = dataset.select(range(config["dataset"]["num_samples"]))
