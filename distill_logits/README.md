@@ -85,7 +85,7 @@ python main.py test
 python main.py test --compare-original
 
 # Test with custom number of samples
-python main.py test --num-samples 10
+python main.py test --num-samples 10 --compare-original
 
 # Save results to file
 python main.py test --compare-original --output-file test_results.json

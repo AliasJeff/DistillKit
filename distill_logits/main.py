@@ -349,31 +349,48 @@ def test_model_outputs(  # noqa: C901
     # Test the specified model
     test_results["models"]["target_model"] = test_single_model("Target Model", model_path)
 
-    # Optionally compare with original student model
+    # Optionally compare with original student model and teacher model
     if compare_original:
         logger.info("\n" + "-" * 70)
         original_model_path = CONFIG["models"]["student"]
         test_results["models"]["original_student"] = test_single_model(
             "Original Student Model", original_model_path)
 
-        # Compare metrics
-        if "error" not in test_results["models"]["target_model"] and "error" not in test_results[
-                "models"]["original_student"]:
-            target_time = test_results["models"]["target_model"]["average_generation_time"]
-            original_time = test_results["models"]["original_student"]["average_generation_time"]
+        # Also test teacher model
+        logger.info("\n" + "-" * 70)
+        teacher_model_path = CONFIG["models"]["teacher"]
+        test_results["models"]["teacher"] = test_single_model("Teacher Model", teacher_model_path)
 
-            speedup = original_time / target_time if target_time > 0 else 0
+        # Compare metrics
+        target_results = test_results["models"]["target_model"]
+        original_results = test_results["models"]["original_student"]
+        teacher_results = test_results["models"]["teacher"]
+
+        if ("error" not in target_results and "error" not in original_results
+                and "error" not in teacher_results):
+            target_time = target_results["average_generation_time"]
+            original_time = original_results["average_generation_time"]
+            teacher_time = teacher_results["average_generation_time"]
+
+            speedup_vs_original = original_time / target_time if target_time > 0 else 0
+            speedup_vs_teacher = teacher_time / target_time if target_time > 0 else 0
+
             test_results["comparison"] = {
                 "target_avg_time": float(target_time),
-                "original_avg_time": float(original_time),
-                "speedup_ratio": float(speedup)
+                "original_student_avg_time": float(original_time),
+                "teacher_avg_time": float(teacher_time),
+                "speedup_vs_original": float(speedup_vs_original),
+                "speedup_vs_teacher": float(speedup_vs_teacher)
             }
 
             logger.info("\n" + "-" * 70)
             logger.info("Comparison Results:")
             logger.info(f"  - Target model avg time: {target_time:.3f}s")
-            logger.info(f"  - Original model avg time: {original_time:.3f}s")
-            logger.info(f"  - Speedup ratio: {speedup:.2f}x")
+            logger.info(f"  - Original student model avg time: {original_time:.3f}s")
+            logger.info(f"  - Teacher model avg time: {teacher_time:.3f}s")
+            logger.info(f"\nSpeedup ratios:")
+            logger.info(f"  - Target vs Original Student: {speedup_vs_original:.2f}x")
+            logger.info(f"  - Target vs Teacher: {speedup_vs_teacher:.2f}x")
 
     # Save results
     try:

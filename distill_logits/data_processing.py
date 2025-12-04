@@ -46,9 +46,13 @@ def sharegpt_format(example, student_tokenizer, config):
 def freedom_intelligence_format(example, student_tokenizer, config, mode="train"):
     """Convert FreedomIntelligence format to chat template format."""
     # Question, Complex_CoT, Response
-    messages = [{"role": "user", "content": example['Question']}]
-    if mode == "train":
-        messages.append({"role": "assistant", "content": example['Response']})
+    messages = [{
+        "role": "user",
+        "content": example['Question']
+    }, {
+        "role": "assistant",
+        "content": example['Response']
+    }]
 
     text = student_tokenizer.apply_chat_template(messages,
                                                  tokenize=False,
