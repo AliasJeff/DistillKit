@@ -186,11 +186,12 @@ def generate_samples(config, num_samples=5, prompts=None):
 
                 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                 generated_ids = model.generate(**inputs,
-                                               max_length=512,
+                                               max_length=1024,
                                                num_beams=1,
                                                temperature=0.7,
                                                top_p=0.9,
                                                do_sample=True,
+                                               eos_token_id=tokenizer.eos_token_id,
                                                pad_token_id=tokenizer.eos_token_id)
 
                 generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
@@ -261,11 +262,7 @@ def test_model_outputs(  # noqa: C901
         if i >= num_samples:
             break
         # Extract the question from the example
-        if 'Question' in example:
-            test_prompts.append(example['Question'])
-        elif 'text' in example:
-            # Fallback: use the text field if Question is not available
-            test_prompts.append(example['text'][:200])
+        test_prompts.append(example['Question'])
 
     logger.info(f"Loaded {len(test_prompts)} test prompts from dataset")
 
@@ -294,11 +291,12 @@ def test_model_outputs(  # noqa: C901
 
                     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                     generated_ids = model.generate(**inputs,
-                                                   max_length=512,
+                                                   max_new_tokens=1024,
                                                    num_beams=1,
                                                    temperature=0.7,
                                                    top_p=0.9,
                                                    do_sample=True,
+                                                   eos_token_id=tokenizer.eos_token_id,
                                                    pad_token_id=tokenizer.eos_token_id)
 
                     elapsed_time = time.time() - start_time
@@ -388,7 +386,7 @@ def test_model_outputs(  # noqa: C901
             logger.info(f"  - Target model avg time: {target_time:.3f}s")
             logger.info(f"  - Original student model avg time: {original_time:.3f}s")
             logger.info(f"  - Teacher model avg time: {teacher_time:.3f}s")
-            logger.info(f"\nSpeedup ratios:")
+            logger.info("\nSpeedup ratios:")
             logger.info(f"  - Target vs Original Student: {speedup_vs_original:.2f}x")
             logger.info(f"  - Target vs Teacher: {speedup_vs_teacher:.2f}x")
 
