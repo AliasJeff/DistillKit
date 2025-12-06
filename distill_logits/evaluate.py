@@ -179,13 +179,17 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, batch_size=
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
+    total_samples = len(dataset)
+    pbar = tqdm(total=total_samples, desc="Generating predictions", unit="sample")
+
     with torch.no_grad():
-        for i in tqdm(range(0, len(dataset), batch_size), desc="Generating predictions"):
+        for i in range(0, len(dataset), batch_size):
             indices = list(range(i, min(i + batch_size, len(dataset))))
             batch = dataset.select(indices)
 
             prompts = []
             refs = []
+
             for sample in batch:
                 refs.append(sample["Response"])
 
@@ -216,6 +220,10 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, batch_size=
                 predictions.append(pred_text)
                 references.append(refs[idx])
 
+                # 每处理一条样本就更新 tqdm
+                pbar.update(1)
+
+    pbar.close()
     return predictions, references
 
 
