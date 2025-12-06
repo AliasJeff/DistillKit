@@ -33,6 +33,9 @@ Examples:
   # Show configuration
   python main.py config
 
+  # Launch Gradio web interface
+  python main.py gradio
+
   # Full pipeline: train, evaluate, and generate samples
   python main.py train --evaluate --generate-samples
         """)
@@ -86,6 +89,9 @@ Examples:
                              help='Compare with original student model')
     test_parser.add_argument('--num-samples', type=int, default=10, help='Number of test samples')
     test_parser.add_argument('--output-file', type=str, help='Save test results to file')
+
+    # Gradio command
+    gradio_parser = subparsers.add_parser('gradio', help='Launch Gradio web interface')
 
     return parser
 
@@ -420,6 +426,21 @@ def test_command(args):
         sys.exit(1)
 
 
+def gradio_command(args):
+    """Launch the Gradio web interface."""
+    logger.info("Launching Gradio web interface for model comparison...")
+    try:
+        from gradio_ui import main as gradio_main
+        gradio_main()
+    except ImportError as e:
+        logger.error("Could not import Gradio. Please install it with 'pip install gradio'")
+        logger.error(f"Error details: {e}")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error launching Gradio interface: {e}", exc_info=True)
+        sys.exit(1)
+
+
 def main():
     """Main entry point."""
     parser = setup_parser()
@@ -441,6 +462,8 @@ def main():
         generate_command(args)
     elif args.command == 'test':
         test_command(args)
+    elif args.command == 'gradio':
+        gradio_command(args)
     else:
         parser.print_help()
 
