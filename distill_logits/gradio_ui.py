@@ -71,7 +71,7 @@ def generate_response(
     message: str,
     history: list,
     model_type: str,
-    max_new_tokens: int = 512,
+    max_new_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.9,
 ):
@@ -237,7 +237,7 @@ def main():
     # Create and launch the interface
     logger.info("Launching Gradio interface...")
     demo = create_gradio_interface()
-    demo.launch(share=False)
+    demo.launch(share=False, port=CONFIG["gradio"]["port"])
 
 
 if __name__ == "__main__":

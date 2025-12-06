@@ -38,7 +38,7 @@ class PeriodicTestCallback(TrainerCallback):
         """Initialize the callback.
         
         Args:
-            test_dataset: The test dataset to evaluate on
+            test_dataset: The test dataset to evaluate on (includes Question/Response fields)
             tokenizer: The tokenizer to use for generation
             eval_steps: Number of steps between evaluations
             num_test_samples: Number of samples to test
@@ -106,9 +106,14 @@ class PeriodicTestCallback(TrainerCallback):
                             logger.info(f"\nTarget:\n{decoded_target}")
 
                         try:
-                            gen_output = model.generate(input_ids=input_ids,
-                                                        attention_mask=attention_mask,
-                                                        max_new_tokens=128)
+                            messages = [{"role": "user", "content": sample["Question"]}]
+                            prompt = tokenizer.apply_chat_template(
+                                messages,
+                                tokenize=False,
+                                add_generation_prompt=True,
+                            )
+                            gen_inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+                            gen_output = model.generate(**gen_inputs, max_new_tokens=256)
                             decoded_gen = tokenizer.decode(gen_output[0], skip_special_tokens=True)
                             logger.info(f"\nModel Output:\n{decoded_gen}")
                         except Exception as ge:

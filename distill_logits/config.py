@@ -42,8 +42,11 @@ CONFIG = {
     },
     "model_config": {
         "use_flash_attention": False
-    }
+    },
     # "spectrum": {
     #     "layers_to_unfreeze": "/workspace/spectrum/snr_results_Qwen-Qwen2-1.5B_unfrozenparameters_50percent.yaml" # You can pass a spectrum yaml file here to freeze layers identified by spectrum.
     # }
+    "gradio": {
+        "port": 7860
+    }
 }

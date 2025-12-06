@@ -12,7 +12,7 @@ from sacrebleu import BLEU
 from collections import Counter
 
 from config import CONFIG
-from data_processing import load_and_preprocess_dataset, prepare_dataset
+from data_processing import load_dataset_split
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -169,12 +169,9 @@ def compute_f1(predictions, references):
         return 0.0
 
 
-def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=256):
+def generate_predictions(model, tokenizer, dataset, max_samples=100, batch_size=8):
     model.eval()
     device = next(model.parameters()).device
-
-    max_context = model.config.max_position_embeddings
-    max_input_len = max_context - max_length
 
     predictions = []
     references = []
@@ -182,40 +179,51 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
+    total_samples = len(dataset)
+    pbar = tqdm(total=total_samples, desc="Generating predictions", unit="sample")
+
     with torch.no_grad():
-        for sample in tqdm(dataset, desc="Generating predictions"):
-            try:
+        for i in range(0, len(dataset), batch_size):
+            indices = list(range(i, min(i + batch_size, len(dataset))))
+            batch = dataset.select(indices)
 
-                ref_text = sample["Response"]
+            prompts = []
+            refs = []
 
-                input_ids = torch.tensor(sample["input_ids"],
-                                         dtype=torch.long).unsqueeze(0).to(device)
-                attention_mask = torch.tensor(sample["attention_mask"]).unsqueeze(0).to(device)
+            for sample in batch:
+                refs.append(sample["Response"])
 
-                # truncate input
-                input_ids = input_ids[:, :max_input_len]
-
-                # generate output tokens only
-                generated_ids = model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_length,
-                    num_beams=1,
-                    do_sample=False,  # deterministic for evaluation
-                    pad_token_id=tokenizer.eos_token_id,
+                messages = [{"role": "user", "content": sample["Question"]}]
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
                 )
+                prompts.append(prompt)
 
-                # decode only the generated part
-                pred_tokens = generated_ids[0][input_ids.size(1):]
-                pred_text = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+            inputs = tokenizer(prompts, return_tensors="pt", padding=True,
+                               truncation=True).to(device)
+
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                num_beams=1,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+            for idx in range(len(prompts)):
+                input_len = inputs.input_ids[idx].shape[0]
+                gen = generated_ids[idx][input_len:]
+                pred_text = tokenizer.decode(gen, skip_special_tokens=True)
 
                 predictions.append(pred_text)
-                references.append(ref_text)
+                references.append(refs[idx])
 
-            except Exception as e:
-                logger.warning(f"Error generating prediction: {e}")
-                continue
+                # 每处理一条样本就更新 tqdm
+                pbar.update(1)
 
+    pbar.close()
     return predictions, references
 
 
@@ -227,18 +235,14 @@ def evaluate_models(config):  # noqa: C901
     results_dir = Path(config["training"]["output_dir"]) / "evaluation"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load dataset
-    logger.info("Loading dataset...")
-    dataset = load_and_preprocess_dataset(config)
-
     # Load tokenizer
     student_tokenizer = AutoTokenizer.from_pretrained(config["models"]["student"])
     student_tokenizer.chat_template = config["tokenizer"]["chat_template"]
 
-    # Prepare dataset
-    logger.info("Preparing dataset...")
-    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config, mode="test")
-    test_dataset = tokenized_dataset["test"]
+    # Load test dataset (already formatted with apply_chat_template)
+    logger.info("Loading test dataset...")
+    test_dataset = load_dataset_split(config, student_tokenizer, split="test")
+    logger.info(f"Test dataset loaded with {len(test_dataset)} samples")
 
     # Initialize results dictionary
     results = {
@@ -251,6 +255,60 @@ def evaluate_models(config):  # noqa: C901
         },
         "models": {}
     }
+
+    # Evaluate teacher model
+    logger.info(f"Evaluating teacher model: {config['models']['teacher']}")
+    try:
+        teacher_tokenizer = AutoTokenizer.from_pretrained(config["models"]["teacher"])
+        teacher_tokenizer.chat_template = config["tokenizer"]["chat_template"]
+
+        teacher_model, _ = load_model_and_tokenizer(
+            config["models"]["teacher"],
+            use_flash_attention=config["model_config"]["use_flash_attention"])
+
+        # Model info
+        total_params, trainable_params = count_parameters(teacher_model)
+        model_size = compute_model_size(teacher_model)
+
+        # Compute perplexity
+        logger.info("Computing perplexity for teacher model...")
+        perplexity, avg_loss = compute_perplexity(teacher_model,
+                                                  teacher_tokenizer,
+                                                  test_dataset,
+                                                  max_samples=100)
+
+        # Generate predictions for F1 and BLEU
+        logger.info("Generating predictions for F1 and BLEU scores...")
+        predictions, references = generate_predictions(teacher_model,
+                                                       teacher_tokenizer,
+                                                       test_dataset,
+                                                       max_samples=100)
+
+        # Compute F1 and BLEU
+        f1_score = compute_f1(predictions, references)
+        bleu_score = compute_bleu(predictions, references)
+
+        results["models"]["teacher"] = {
+            "model_name": config["models"]["teacher"],
+            "total_parameters": int(total_params),
+            "trainable_parameters": int(trainable_params),
+            "model_size_mb": float(model_size),
+            "perplexity": float(perplexity),
+            "average_loss": float(avg_loss),
+            "f1_score": float(f1_score),
+            "bleu_score": float(bleu_score),
+        }
+
+        logger.info(
+            f"Teacher model - Perplexity: {perplexity:.4f}, F1: {f1_score:.4f}, BLEU: {bleu_score:.4f}, Size: {model_size:.2f}MB"
+        )
+
+        del teacher_model
+        torch.cuda.empty_cache()
+
+    except Exception as e:
+        logger.error(f"Error evaluating teacher model: {e}")
+        results["models"]["teacher"] = {"error": str(e)}
 
     # Evaluate original student model
     logger.info(f"Evaluating original student model: {config['models']['student']}")
@@ -362,13 +420,16 @@ def evaluate_models(config):  # noqa: C901
         }
 
     # Compute comparison metrics
+    results["comparison"] = {}
+
+    # Compare distilled vs original student
     if "original_student" in results["models"] and "distilled_student" in results["models"]:
         if "error" not in results["models"]["original_student"] and "error" not in results[
                 "models"]["distilled_student"]:
             original_ppl = results["models"]["original_student"]["perplexity"]
             distilled_ppl = results["models"]["distilled_student"]["perplexity"]
 
-            results["comparison"] = {
+            results["comparison"]["distilled_vs_original_student"] = {
                 "perplexity_improvement": float(
                     (original_ppl - distilled_ppl) / original_ppl * 100),
                 "perplexity_ratio": float(distilled_ppl / original_ppl),
@@ -377,7 +438,38 @@ def evaluate_models(config):  # noqa: C901
             }
 
             logger.info(
-                f"Perplexity improvement: {results['comparison']['perplexity_improvement']:.2f}%")
+                f"Distilled vs Original Student - Perplexity improvement: {results['comparison']['distilled_vs_original_student']['perplexity_improvement']:.2f}%"
+            )
+
+    # Compare student models vs teacher
+    if "teacher" in results["models"] and "error" not in results["models"]["teacher"]:
+        teacher_ppl = results["models"]["teacher"]["perplexity"]
+
+        if "original_student" in results["models"] and "error" not in results["models"][
+                "original_student"]:
+            original_ppl = results["models"]["original_student"]["perplexity"]
+            results["comparison"]["original_student_vs_teacher"] = {
+                "perplexity_gap": float(original_ppl - teacher_ppl),
+                "perplexity_ratio": float(original_ppl / teacher_ppl),
+                "teacher_perplexity": float(teacher_ppl),
+                "student_perplexity": float(original_ppl),
+            }
+            logger.info(
+                f"Original Student vs Teacher - Perplexity gap: {results['comparison']['original_student_vs_teacher']['perplexity_gap']:.4f}, Ratio: {results['comparison']['original_student_vs_teacher']['perplexity_ratio']:.4f}"
+            )
+
+        if "distilled_student" in results["models"] and "error" not in results["models"][
+                "distilled_student"]:
+            distilled_ppl = results["models"]["distilled_student"]["perplexity"]
+            results["comparison"]["distilled_student_vs_teacher"] = {
+                "perplexity_gap": float(distilled_ppl - teacher_ppl),
+                "perplexity_ratio": float(distilled_ppl / teacher_ppl),
+                "teacher_perplexity": float(teacher_ppl),
+                "student_perplexity": float(distilled_ppl),
+            }
+            logger.info(
+                f"Distilled Student vs Teacher - Perplexity gap: {results['comparison']['distilled_student_vs_teacher']['perplexity_gap']:.4f}, Ratio: {results['comparison']['distilled_student_vs_teacher']['perplexity_ratio']:.4f}"
+            )
 
     # Save results
     results_file = results_dir / f"evaluation_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -387,9 +479,17 @@ def evaluate_models(config):  # noqa: C901
     logger.info(f"Evaluation results saved to {results_file}")
 
     # Print summary
-    logger.info("\n" + "=" * 50)
+    logger.info("\n" + "=" * 80)
     logger.info("EVALUATION SUMMARY")
-    logger.info("=" * 50)
+    logger.info("=" * 80)
+
+    if "teacher" in results["models"] and "error" not in results["models"]["teacher"]:
+        logger.info("Teacher Model:")
+        logger.info(f"  - Perplexity: {results['models']['teacher']['perplexity']:.4f}")
+        logger.info(f"  - F1 Score: {results['models']['teacher']['f1_score']:.4f}")
+        logger.info(f"  - BLEU Score: {results['models']['teacher']['bleu_score']:.4f}")
+        logger.info(f"  - Model Size: {results['models']['teacher']['model_size_mb']:.2f}MB")
+        logger.info(f"  - Parameters: {results['models']['teacher']['total_parameters']:,}")
 
     if "original_student" in results["models"] and "error" not in results["models"][
             "original_student"]:
@@ -413,13 +513,28 @@ def evaluate_models(config):  # noqa: C901
         logger.info(
             f"  - Parameters: {results['models']['distilled_student']['total_parameters']:,}")
 
-    if "comparison" in results:
-        logger.info("Comparison:")
-        logger.info(
-            f"  - Perplexity Improvement: {results['comparison']['perplexity_improvement']:.2f}%")
-        logger.info(f"  - Perplexity Ratio: {results['comparison']['perplexity_ratio']:.4f}")
+    if "comparison" in results and results["comparison"]:
+        logger.info("Comparison Metrics:")
 
-    logger.info("=" * 50)
+        if "distilled_vs_original_student" in results["comparison"]:
+            comp = results["comparison"]["distilled_vs_original_student"]
+            logger.info("  Distilled vs Original Student:")
+            logger.info(f"    - Perplexity Improvement: {comp['perplexity_improvement']:.2f}%")
+            logger.info(f"    - Perplexity Ratio: {comp['perplexity_ratio']:.4f}")
+
+        if "original_student_vs_teacher" in results["comparison"]:
+            comp = results["comparison"]["original_student_vs_teacher"]
+            logger.info("  Original Student vs Teacher:")
+            logger.info(f"    - Perplexity Gap: {comp['perplexity_gap']:.4f}")
+            logger.info(f"    - Perplexity Ratio: {comp['perplexity_ratio']:.4f}")
+
+        if "distilled_student_vs_teacher" in results["comparison"]:
+            comp = results["comparison"]["distilled_student_vs_teacher"]
+            logger.info("  Distilled Student vs Teacher:")
+            logger.info(f"    - Perplexity Gap: {comp['perplexity_gap']:.4f}")
+            logger.info(f"    - Perplexity Ratio: {comp['perplexity_ratio']:.4f}")
+
+    logger.info("=" * 80)
 
     return results
 
