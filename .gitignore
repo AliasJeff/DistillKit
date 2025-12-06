@@ -73,6 +73,9 @@ outputs/
 logs/
 *.log
 
+# Dataset
+dataset_cache/
+
 # Temporary files
 *.tmp
 *.temp

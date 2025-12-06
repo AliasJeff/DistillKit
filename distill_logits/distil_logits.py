@@ -4,10 +4,12 @@ import torch
 import torch.nn.functional as F
 from trl import SFTTrainer
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers.trainer_callback import TrainerCallback
 import yaml
+from datetime import datetime
 
 from config import CONFIG
-from data_processing import load_and_preprocess_dataset, prepare_dataset
+from data_processing import load_dataset_split
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -27,6 +29,109 @@ def freeze_student_spectrum(model, unfrozen_layers_file, logger):
             param.requires_grad = True
 
     logger.info(f"Froze layers based on spectrum configuration: {unfrozen_layers_file}")
+
+
+class PeriodicTestCallback(TrainerCallback):
+    """Callback to run periodic test evaluation during training."""
+
+    def __init__(self, test_dataset, tokenizer, eval_steps=500, num_test_samples=5):
+        """Initialize the callback.
+        
+        Args:
+            test_dataset: The test dataset to evaluate on
+            tokenizer: The tokenizer to use for generation
+            eval_steps: Number of steps between evaluations
+            num_test_samples: Number of samples to test
+        """
+        self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
+        self.eval_steps = eval_steps
+        self.num_test_samples = num_test_samples
+        self.test_results = []
+
+    def on_step_end(self, args, state, control, **kwargs):  # noqa: C901
+        """Called at the end of each training step."""
+        if state.global_step % self.eval_steps == 0 and state.global_step > 0:
+            model = kwargs.get('model')
+            tokenizer = kwargs.get('tokenizer')
+            if model is None or tokenizer is None:
+                return
+
+            logger.info(f"\n{'='*70}")
+            logger.info(f"PERIODIC TEST EVALUATION - Step {state.global_step}")
+            logger.info(f"{'='*70}")
+
+            try:
+                model.eval()
+                with torch.no_grad():
+                    import random
+                    test_indices = random.sample(range(len(self.test_dataset)),
+                                                 min(self.num_test_samples, len(self.test_dataset)))
+
+                    total_loss = 0
+                    for idx, sample_idx in enumerate(test_indices, 1):
+                        sample = self.test_dataset[sample_idx]
+
+                        # Prepare input
+                        input_ids = torch.tensor([sample['input_ids']]).to(model.device)
+                        attention_mask = torch.tensor([sample['attention_mask']]).to(model.device)
+
+                        # Forward pass
+                        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
+                        if isinstance(outputs, dict):
+                            loss = outputs.get("loss", None)
+                        else:
+                            loss = getattr(outputs, "loss", None)
+
+                        if loss is not None:
+                            total_loss += float(loss.detach().cpu().item())
+                            logger.info(
+                                f"  Sample {idx}/{self.num_test_samples}: Loss = {loss:.4f}")
+
+                        decoded_input = tokenizer.decode(sample["input_ids"],
+                                                         skip_special_tokens=True)
+
+                        decoded_target = None
+                        if "labels" in sample:
+                            decoded_target = tokenizer.decode([
+                                t if t != -100 else tokenizer.pad_token_id for t in sample["labels"]
+                            ],
+                                                              skip_special_tokens=True)
+
+                        logger.info("\n------ Q&A Example ------")
+                        logger.info(f"Prompt:\n{decoded_input}")
+
+                        if decoded_target:
+                            logger.info(f"\nTarget:\n{decoded_target}")
+
+                        try:
+                            gen_output = model.generate(input_ids=input_ids,
+                                                        attention_mask=attention_mask,
+                                                        max_new_tokens=128)
+                            decoded_gen = tokenizer.decode(gen_output[0], skip_special_tokens=True)
+                            logger.info(f"\nModel Output:\n{decoded_gen}")
+                        except Exception as ge:
+                            logger.warning(f"Generation error: {ge}")
+
+                    # Average loss
+                    avg_loss = total_loss / self.num_test_samples if self.num_test_samples > 0 else 0
+                    logger.info(f"\nAverage Test Loss: {avg_loss:.4f}")
+
+                    # Save result
+                    self.test_results.append({
+                        "step": state.global_step,
+                        "avg_loss": avg_loss,
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                model.train()
+
+            except Exception as e:
+                logger.error(f"Error during periodic test evaluation: {e}", exc_info=True)
+                model.train()
+
+            logger.info(f"{'='*70}\n")
 
 
 def pad_logits(student_logits, teacher_logits):
@@ -92,11 +197,6 @@ def main():
     os.environ['WANDB_PROJECT'] = config["project_name"]
     logger.info(f"Project name: {config['project_name']}")
 
-    # Load and preprocess dataset
-    logger.info("Loading and preprocessing dataset...")
-    dataset = load_and_preprocess_dataset(config)
-    logger.info(f"Dataset loaded with {len(dataset)} samples")
-
     # Load tokenizers
     logger.info(
         f"Loading tokenizers: teacher={config['models']['teacher']}, student={config['models']['student']}"
@@ -107,12 +207,14 @@ def main():
     # Apply chat template to student tokenizer
     student_tokenizer.chat_template = config["tokenizer"]["chat_template"]
 
-    # Prepare and tokenize the dataset
-    logger.info("Preparing and tokenizing dataset...")
-    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config)
-    logger.info(
-        f"Tokenized dataset: train={len(tokenized_dataset['train'])}, test={len(tokenized_dataset['test'])}"
-    )
+    # Load train and test datasets (from cache if available, otherwise process)
+    logger.info("Loading train dataset...")
+    train_dataset = load_dataset_split(config, student_tokenizer, split="train")
+    logger.info(f"Train dataset loaded with {len(train_dataset)} samples")
+
+    logger.info("Loading test dataset...")
+    test_dataset = load_dataset_split(config, student_tokenizer, split="test")
+    logger.info(f"Test dataset loaded with {len(test_dataset)} samples")
 
     # Load models with configurable flash attention
     logger.info("Loading models...")
@@ -122,8 +224,10 @@ def main():
         logger.info("Using flash attention 2")
 
     teacher_model = AutoModelForCausalLM.from_pretrained(config["models"]["teacher"],
+                                                         device_map="auto",
                                                          **model_kwargs)
     student_model = AutoModelForCausalLM.from_pretrained(config["models"]["student"],
+                                                         device_map="auto",
                                                          **model_kwargs)
     logger.info("Models loaded successfully")
 
@@ -142,8 +246,8 @@ def main():
     logger.info("Creating trainer...")
     trainer = LogitsTrainer(
         model=student_model,
-        train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["test"],
+        train_dataset=train_dataset,
+        eval_dataset=test_dataset,
         args=training_arguments,
     )
 
@@ -152,6 +256,15 @@ def main():
 
     # Add the teacher model to the trainer
     trainer.teacher_model = teacher_model
+
+    # Add periodic test evaluation callback
+    eval_steps = config["training"].get("eval_steps", 500)
+    test_callback = PeriodicTestCallback(test_dataset=test_dataset,
+                                         tokenizer=student_tokenizer,
+                                         eval_steps=eval_steps,
+                                         num_test_samples=5)
+    trainer.add_callback(test_callback)
+    logger.info(f"Added periodic test callback (every {eval_steps} steps)")
 
     # Train the model
     logger.info("Starting training...")

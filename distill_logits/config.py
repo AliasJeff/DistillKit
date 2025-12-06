@@ -3,14 +3,15 @@
 CONFIG = {
     "project_name": "distil-logits",
     "dataset": {
-        "name": "mlabonne/FineTome-100k",
+        "name": "FreedomIntelligence/medical-o1-reasoning-SFT",
+        "lang": "en",
         "split": "train",
         # "num_samples": , # You can pass a number here to limit the number of samples to use.
         "seed": 42
     },
     "models": {
-        "teacher": "arcee-ai/Arcee-Spark",
-        "student": "Qwen/Qwen2-1.5B"
+        "teacher": "XformAI-india/Qwen3-1.7B-medicaldataset",
+        "student": "Qwen/Qwen3-0.6B"
     },
     "tokenizer": {
         "max_length":
@@ -24,6 +25,7 @@ CONFIG = {
         "per_device_train_batch_size": 1,
         "gradient_accumulation_steps": 8,
         "save_steps": 1000,
+        "eval_steps": 300,  # Evaluate every 300 steps
         "logging_steps": 1,
         "learning_rate": 2e-5,
         "weight_decay": 0.05,
@@ -39,7 +41,7 @@ CONFIG = {
         "alpha": 0.5
     },
     "model_config": {
-        "use_flash_attention": True
+        "use_flash_attention": False
     }
     # "spectrum": {
     #     "layers_to_unfreeze": "/workspace/spectrum/snr_results_Qwen-Qwen2-1.5B_unfrozenparameters_50percent.yaml" # You can pass a spectrum yaml file here to freeze layers identified by spectrum.

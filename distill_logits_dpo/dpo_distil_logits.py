@@ -562,10 +562,12 @@ lora_cfg = LoraConfig(
 )
 
 student_model = AutoModelForCausalLM.from_pretrained(cfg["models"]["student"],
+                                                     device_map="auto",
                                                      quantization_config=bnb_cfg)
 student_model.config.use_cache = False  # required for gradient-checkpointing
 
 teacher_model = AutoModelForCausalLM.from_pretrained(cfg["models"]["teacher"],
+                                                     device_map="auto",
                                                      quantization_config=bnb_cfg)
 teacher_model.eval()  # we never train the teacher
 
@@ -599,6 +601,7 @@ tok_student.save_pretrained(cfg["paths"]["output_dir"])
 
 # ─ merge LoRA into full-precision base model ─
 base_fp16 = AutoModelForCausalLM.from_pretrained(cfg["models"]["student"],
+                                                 device_map="auto",
                                                  torch_dtype=torch.float16,
                                                  return_dict=True)
 merged = PeftModel.from_pretrained(base_fp16, cfg["paths"]["output_dir"])
