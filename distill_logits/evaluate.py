@@ -169,7 +169,7 @@ def compute_f1(predictions, references):
         return 0.0
 
 
-def generate_predictions(model, tokenizer, dataset, max_samples=100):
+def generate_predictions(model, tokenizer, dataset, max_samples=100, batch_size=8):
     model.eval()
     device = next(model.parameters()).device
 
@@ -180,40 +180,40 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100):
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
     with torch.no_grad():
-        for sample in tqdm(dataset, desc="Generating predictions"):
-            try:
+        for i in tqdm(range(0, len(dataset), batch_size), desc="Generating predictions"):
+            batch = dataset[i:i + batch_size]
 
-                ref_text = sample["Response"]
+            prompts = []
+            refs = []
+            for sample in batch:
+                refs.append(sample["Response"])
 
-                # Use apply_chat_template to format the prompt
                 messages = [{"role": "user", "content": sample["Question"]}]
-                prompt = tokenizer.apply_chat_template(messages,
-                                                       tokenize=False,
-                                                       add_generation_prompt=True)
-
-                inputs = tokenizer(prompt, return_tensors="pt").to(device)
-                attention_mask = inputs["attention_mask"]
-
-                # generate output tokens only
-                generated_ids = model.generate(
-                    **inputs,
-                    attention_mask=attention_mask,
-                    max_new_tokens=256,
-                    num_beams=1,
-                    do_sample=False,  # deterministic for evaluation
-                    pad_token_id=tokenizer.eos_token_id,
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
                 )
+                prompts.append(prompt)
 
-                # decode only the generated part
-                pred_tokens = generated_ids[0][inputs.input_ids.shape[1]:]
-                pred_text = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+            inputs = tokenizer(prompts, return_tensors="pt", padding=True,
+                               truncation=True).to(device)
+
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                num_beams=1,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+            for idx in range(len(prompts)):
+                input_len = inputs.input_ids[idx].shape[0]
+                gen = generated_ids[idx][input_len:]
+                pred_text = tokenizer.decode(gen, skip_special_tokens=True)
 
                 predictions.append(pred_text)
-                references.append(ref_text)
-
-            except Exception as e:
-                logger.warning(f"Error generating prediction: {e}")
-                continue
+                references.append(refs[idx])
 
     return predictions, references
 
