@@ -181,7 +181,8 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, batch_size=
 
     with torch.no_grad():
         for i in tqdm(range(0, len(dataset), batch_size), desc="Generating predictions"):
-            batch = dataset[i:i + batch_size]
+            indices = list(range(i, min(i + batch_size, len(dataset))))
+            batch = dataset.select(indices)
 
             prompts = []
             refs = []
@@ -246,6 +247,60 @@ def evaluate_models(config):  # noqa: C901
         },
         "models": {}
     }
+
+    # Evaluate teacher model
+    logger.info(f"Evaluating teacher model: {config['models']['teacher']}")
+    try:
+        teacher_tokenizer = AutoTokenizer.from_pretrained(config["models"]["teacher"])
+        teacher_tokenizer.chat_template = config["tokenizer"]["chat_template"]
+
+        teacher_model, _ = load_model_and_tokenizer(
+            config["models"]["teacher"],
+            use_flash_attention=config["model_config"]["use_flash_attention"])
+
+        # Model info
+        total_params, trainable_params = count_parameters(teacher_model)
+        model_size = compute_model_size(teacher_model)
+
+        # Compute perplexity
+        logger.info("Computing perplexity for teacher model...")
+        perplexity, avg_loss = compute_perplexity(teacher_model,
+                                                  teacher_tokenizer,
+                                                  test_dataset,
+                                                  max_samples=100)
+
+        # Generate predictions for F1 and BLEU
+        logger.info("Generating predictions for F1 and BLEU scores...")
+        predictions, references = generate_predictions(teacher_model,
+                                                       teacher_tokenizer,
+                                                       test_dataset,
+                                                       max_samples=100)
+
+        # Compute F1 and BLEU
+        f1_score = compute_f1(predictions, references)
+        bleu_score = compute_bleu(predictions, references)
+
+        results["models"]["teacher"] = {
+            "model_name": config["models"]["teacher"],
+            "total_parameters": int(total_params),
+            "trainable_parameters": int(trainable_params),
+            "model_size_mb": float(model_size),
+            "perplexity": float(perplexity),
+            "average_loss": float(avg_loss),
+            "f1_score": float(f1_score),
+            "bleu_score": float(bleu_score),
+        }
+
+        logger.info(
+            f"Teacher model - Perplexity: {perplexity:.4f}, F1: {f1_score:.4f}, BLEU: {bleu_score:.4f}, Size: {model_size:.2f}MB"
+        )
+
+        del teacher_model
+        torch.cuda.empty_cache()
+
+    except Exception as e:
+        logger.error(f"Error evaluating teacher model: {e}")
+        results["models"]["teacher"] = {"error": str(e)}
 
     # Evaluate original student model
     logger.info(f"Evaluating original student model: {config['models']['student']}")
@@ -357,13 +412,16 @@ def evaluate_models(config):  # noqa: C901
         }
 
     # Compute comparison metrics
+    results["comparison"] = {}
+
+    # Compare distilled vs original student
     if "original_student" in results["models"] and "distilled_student" in results["models"]:
         if "error" not in results["models"]["original_student"] and "error" not in results[
                 "models"]["distilled_student"]:
             original_ppl = results["models"]["original_student"]["perplexity"]
             distilled_ppl = results["models"]["distilled_student"]["perplexity"]
 
-            results["comparison"] = {
+            results["comparison"]["distilled_vs_original_student"] = {
                 "perplexity_improvement": float(
                     (original_ppl - distilled_ppl) / original_ppl * 100),
                 "perplexity_ratio": float(distilled_ppl / original_ppl),
@@ -372,7 +430,38 @@ def evaluate_models(config):  # noqa: C901
             }
 
             logger.info(
-                f"Perplexity improvement: {results['comparison']['perplexity_improvement']:.2f}%")
+                f"Distilled vs Original Student - Perplexity improvement: {results['comparison']['distilled_vs_original_student']['perplexity_improvement']:.2f}%"
+            )
+
+    # Compare student models vs teacher
+    if "teacher" in results["models"] and "error" not in results["models"]["teacher"]:
+        teacher_ppl = results["models"]["teacher"]["perplexity"]
+
+        if "original_student" in results["models"] and "error" not in results["models"][
+                "original_student"]:
+            original_ppl = results["models"]["original_student"]["perplexity"]
+            results["comparison"]["original_student_vs_teacher"] = {
+                "perplexity_gap": float(original_ppl - teacher_ppl),
+                "perplexity_ratio": float(original_ppl / teacher_ppl),
+                "teacher_perplexity": float(teacher_ppl),
+                "student_perplexity": float(original_ppl),
+            }
+            logger.info(
+                f"Original Student vs Teacher - Perplexity gap: {results['comparison']['original_student_vs_teacher']['perplexity_gap']:.4f}, Ratio: {results['comparison']['original_student_vs_teacher']['perplexity_ratio']:.4f}"
+            )
+
+        if "distilled_student" in results["models"] and "error" not in results["models"][
+                "distilled_student"]:
+            distilled_ppl = results["models"]["distilled_student"]["perplexity"]
+            results["comparison"]["distilled_student_vs_teacher"] = {
+                "perplexity_gap": float(distilled_ppl - teacher_ppl),
+                "perplexity_ratio": float(distilled_ppl / teacher_ppl),
+                "teacher_perplexity": float(teacher_ppl),
+                "student_perplexity": float(distilled_ppl),
+            }
+            logger.info(
+                f"Distilled Student vs Teacher - Perplexity gap: {results['comparison']['distilled_student_vs_teacher']['perplexity_gap']:.4f}, Ratio: {results['comparison']['distilled_student_vs_teacher']['perplexity_ratio']:.4f}"
+            )
 
     # Save results
     results_file = results_dir / f"evaluation_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -382,9 +471,17 @@ def evaluate_models(config):  # noqa: C901
     logger.info(f"Evaluation results saved to {results_file}")
 
     # Print summary
-    logger.info("\n" + "=" * 50)
+    logger.info("\n" + "=" * 80)
     logger.info("EVALUATION SUMMARY")
-    logger.info("=" * 50)
+    logger.info("=" * 80)
+
+    if "teacher" in results["models"] and "error" not in results["models"]["teacher"]:
+        logger.info("Teacher Model:")
+        logger.info(f"  - Perplexity: {results['models']['teacher']['perplexity']:.4f}")
+        logger.info(f"  - F1 Score: {results['models']['teacher']['f1_score']:.4f}")
+        logger.info(f"  - BLEU Score: {results['models']['teacher']['bleu_score']:.4f}")
+        logger.info(f"  - Model Size: {results['models']['teacher']['model_size_mb']:.2f}MB")
+        logger.info(f"  - Parameters: {results['models']['teacher']['total_parameters']:,}")
 
     if "original_student" in results["models"] and "error" not in results["models"][
             "original_student"]:
@@ -408,13 +505,28 @@ def evaluate_models(config):  # noqa: C901
         logger.info(
             f"  - Parameters: {results['models']['distilled_student']['total_parameters']:,}")
 
-    if "comparison" in results:
-        logger.info("Comparison:")
-        logger.info(
-            f"  - Perplexity Improvement: {results['comparison']['perplexity_improvement']:.2f}%")
-        logger.info(f"  - Perplexity Ratio: {results['comparison']['perplexity_ratio']:.4f}")
+    if "comparison" in results and results["comparison"]:
+        logger.info("Comparison Metrics:")
 
-    logger.info("=" * 50)
+        if "distilled_vs_original_student" in results["comparison"]:
+            comp = results["comparison"]["distilled_vs_original_student"]
+            logger.info("  Distilled vs Original Student:")
+            logger.info(f"    - Perplexity Improvement: {comp['perplexity_improvement']:.2f}%")
+            logger.info(f"    - Perplexity Ratio: {comp['perplexity_ratio']:.4f}")
+
+        if "original_student_vs_teacher" in results["comparison"]:
+            comp = results["comparison"]["original_student_vs_teacher"]
+            logger.info("  Original Student vs Teacher:")
+            logger.info(f"    - Perplexity Gap: {comp['perplexity_gap']:.4f}")
+            logger.info(f"    - Perplexity Ratio: {comp['perplexity_ratio']:.4f}")
+
+        if "distilled_student_vs_teacher" in results["comparison"]:
+            comp = results["comparison"]["distilled_student_vs_teacher"]
+            logger.info("  Distilled Student vs Teacher:")
+            logger.info(f"    - Perplexity Gap: {comp['perplexity_gap']:.4f}")
+            logger.info(f"    - Perplexity Ratio: {comp['perplexity_ratio']:.4f}")
+
+    logger.info("=" * 80)
 
     return results
 
