@@ -161,7 +161,9 @@ def config_command(args):
 def generate_samples(config, num_samples=5, prompts=None):
     """Generate sample outputs from the trained model."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    from data_processing import load_dataset_split
     import torch
+    import random
 
     logger.info(f"Loading model from {config['training']['output_dir']}")
 
@@ -169,30 +171,39 @@ def generate_samples(config, num_samples=5, prompts=None):
         # Load model and tokenizer
         model_path = config["training"]["output_dir"]
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer.chat_template = config["tokenizer"]["chat_template"]
         model = AutoModelForCausalLM.from_pretrained(model_path,
                                                      torch_dtype=torch.bfloat16,
                                                      device_map="auto")
 
-        # Default prompts if none provided
+        # Load prompts from dataset if none provided
         if not prompts:
-            prompts = [
-                "What is machine learning?", "Explain quantum computing",
-                "How does photosynthesis work?", "What are the benefits of exercise?",
-                "Describe the water cycle"
-            ][:num_samples]
+            logger.info("Loading prompts from dataset...")
+            test_dataset = load_dataset_split(config, tokenizer, split="test")
+            # Randomly sample questions from dataset
+            num_to_sample = min(num_samples, len(test_dataset))
+            sample_indices = random.sample(range(len(test_dataset)), num_to_sample)
+            prompts = [test_dataset[idx]["Question"] for idx in sample_indices]
+            logger.info(f"Loaded {len(prompts)} prompts from dataset")
 
         logger.info(f"\nGenerating {len(prompts)} samples...\n")
         logger.info("=" * 60)
 
         model.eval()
         with torch.no_grad():
-            for i, prompt in enumerate(prompts, 1):
+            for i, question in enumerate(prompts, 1):
                 logger.info(f"Sample {i}:")
-                logger.info(f"Prompt: {prompt}")
+                logger.info(f"Question: {question}")
+
+                # Use apply_chat_template to format the prompt
+                messages = [{"role": "user", "content": question}]
+                prompt = tokenizer.apply_chat_template(messages,
+                                                       tokenize=False,
+                                                       add_generation_prompt=True)
 
                 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                 generated_ids = model.generate(**inputs,
-                                               max_length=1024,
+                                               max_new_tokens=256,
                                                num_beams=1,
                                                temperature=0.7,
                                                top_p=0.9,
@@ -200,7 +211,9 @@ def generate_samples(config, num_samples=5, prompts=None):
                                                eos_token_id=tokenizer.eos_token_id,
                                                pad_token_id=tokenizer.eos_token_id)
 
-                generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                # Decode only the generated part
+                generated_text = tokenizer.decode(generated_ids[0][inputs.input_ids.shape[1]:],
+                                                  skip_special_tokens=True)
                 logger.info(f"Output: {generated_text}\n")
 
         logger.info("=" * 60)
@@ -241,7 +254,7 @@ def test_model_outputs(  # noqa: C901
     import torch
     import json
     from datetime import datetime
-    from data_processing import load_and_preprocess_dataset
+    from data_processing import load_dataset_split
 
     logger.info("\n" + "=" * 70)
     logger.info("MODEL OUTPUT TEST")
@@ -261,14 +274,14 @@ def test_model_outputs(  # noqa: C901
 
     # Load test prompts from dataset
     logger.info("Loading test prompts from dataset...")
-    dataset = load_and_preprocess_dataset(CONFIG)
+    # Create a temporary tokenizer for loading the dataset
+    temp_tokenizer = AutoTokenizer.from_pretrained(CONFIG["models"]["student"])
+    temp_tokenizer.chat_template = CONFIG["tokenizer"]["chat_template"]
+    test_dataset = load_dataset_split(CONFIG, temp_tokenizer, split="test")
     # Extract questions from the dataset
     test_prompts = []
-    for i, example in enumerate(dataset):
-        if i >= num_samples:
-            break
-        # Extract the question from the example
-        test_prompts.append(example['Question'])
+    for i in range(min(num_samples, len(test_dataset))):
+        test_prompts.append(test_dataset[i]['Question'])
 
     logger.info(f"Loaded {len(test_prompts)} test prompts from dataset")
 
@@ -280,6 +293,7 @@ def test_model_outputs(  # noqa: C901
         try:
             # Load model and tokenizer
             tokenizer = AutoTokenizer.from_pretrained(model_path_to_load)
+            tokenizer.chat_template = CONFIG["tokenizer"]["chat_template"]
             model = AutoModelForCausalLM.from_pretrained(model_path_to_load,
                                                          torch_dtype=torch.bfloat16,
                                                          device_map="auto")
@@ -291,13 +305,19 @@ def test_model_outputs(  # noqa: C901
             logger.info(f"Generating {len(test_prompts)} test outputs...")
 
             with torch.no_grad():
-                for i, prompt in enumerate(test_prompts, 1):
+                for i, question in enumerate(test_prompts, 1):
                     import time
                     start_time = time.time()
 
+                    # Use apply_chat_template to format the prompt
+                    messages = [{"role": "user", "content": question}]
+                    prompt = tokenizer.apply_chat_template(messages,
+                                                           tokenize=False,
+                                                           add_generation_prompt=True)
+
                     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                     generated_ids = model.generate(**inputs,
-                                                   max_new_tokens=1024,
+                                                   max_new_tokens=256,
                                                    num_beams=1,
                                                    temperature=0.7,
                                                    top_p=0.9,
@@ -308,10 +328,12 @@ def test_model_outputs(  # noqa: C901
                     elapsed_time = time.time() - start_time
                     total_time += elapsed_time
 
-                    generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                    # Decode only the generated part
+                    generated_text = tokenizer.decode(generated_ids[0][inputs.input_ids.shape[1]:],
+                                                      skip_special_tokens=True)
 
                     output_info = {
-                        "prompt": prompt,
+                        "question": question,
                         "output": generated_text,
                         "output_length": len(generated_text.split()),
                         "generation_time": elapsed_time

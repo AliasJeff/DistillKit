@@ -12,7 +12,7 @@ from sacrebleu import BLEU
 from collections import Counter
 
 from config import CONFIG
-from data_processing import load_and_preprocess_dataset, prepare_dataset
+from data_processing import load_dataset_split
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -169,12 +169,9 @@ def compute_f1(predictions, references):
         return 0.0
 
 
-def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=256):
+def generate_predictions(model, tokenizer, dataset, max_samples=100):
     model.eval()
     device = next(model.parameters()).device
-
-    max_context = model.config.max_position_embeddings
-    max_input_len = max_context - max_length
 
     predictions = []
     references = []
@@ -188,25 +185,27 @@ def generate_predictions(model, tokenizer, dataset, max_samples=100, max_length=
 
                 ref_text = sample["Response"]
 
-                input_ids = torch.tensor(sample["input_ids"],
-                                         dtype=torch.long).unsqueeze(0).to(device)
-                attention_mask = torch.tensor(sample["attention_mask"]).unsqueeze(0).to(device)
+                # Use apply_chat_template to format the prompt
+                messages = [{"role": "user", "content": sample["Question"]}]
+                prompt = tokenizer.apply_chat_template(messages,
+                                                       tokenize=False,
+                                                       add_generation_prompt=True)
 
-                # truncate input
-                input_ids = input_ids[:, :max_input_len]
+                inputs = tokenizer(prompt, return_tensors="pt").to(device)
+                attention_mask = inputs["attention_mask"]
 
                 # generate output tokens only
                 generated_ids = model.generate(
-                    input_ids,
+                    **inputs,
                     attention_mask=attention_mask,
-                    max_new_tokens=max_length,
+                    max_new_tokens=256,
                     num_beams=1,
                     do_sample=False,  # deterministic for evaluation
                     pad_token_id=tokenizer.eos_token_id,
                 )
 
                 # decode only the generated part
-                pred_tokens = generated_ids[0][input_ids.size(1):]
+                pred_tokens = generated_ids[0][inputs.input_ids.shape[1]:]
                 pred_text = tokenizer.decode(pred_tokens, skip_special_tokens=True)
 
                 predictions.append(pred_text)
@@ -227,18 +226,14 @@ def evaluate_models(config):  # noqa: C901
     results_dir = Path(config["training"]["output_dir"]) / "evaluation"
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load dataset
-    logger.info("Loading dataset...")
-    dataset = load_and_preprocess_dataset(config)
-
     # Load tokenizer
     student_tokenizer = AutoTokenizer.from_pretrained(config["models"]["student"])
     student_tokenizer.chat_template = config["tokenizer"]["chat_template"]
 
-    # Prepare dataset
-    logger.info("Preparing dataset...")
-    tokenized_dataset = prepare_dataset(dataset, student_tokenizer, config, mode="test")
-    test_dataset = tokenized_dataset["test"]
+    # Load test dataset (already formatted with apply_chat_template)
+    logger.info("Loading test dataset...")
+    test_dataset = load_dataset_split(config, student_tokenizer, split="test")
+    logger.info(f"Test dataset loaded with {len(test_dataset)} samples")
 
     # Initialize results dictionary
     results = {

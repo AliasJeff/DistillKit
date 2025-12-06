@@ -44,7 +44,7 @@ def sharegpt_format(example, student_tokenizer, config):
 
 
 def freedom_intelligence_format(example, student_tokenizer, config, mode="train"):
-    """Convert FreedomIntelligence format to chat template format."""
+    """Convert FreedomIntelligence format to chat template format using apply_chat_template."""
     # Question, Complex_CoT, Response
     messages = [{
         "role": "user",
@@ -56,8 +56,10 @@ def freedom_intelligence_format(example, student_tokenizer, config, mode="train"
 
     text = student_tokenizer.apply_chat_template(messages,
                                                  tokenize=False,
-                                                 add_generation_prompt=True)
-    return {"text": text}
+                                                 add_generation_prompt=False)
+
+    # Return formatted text along with original fields for later use
+    return {"text": text, "Question": example['Question'], "Response": example['Response']}
 
 
 def tokenize_function(examples, student_tokenizer, config):
@@ -111,13 +113,14 @@ def load_dataset_split(config, student_tokenizer, split="train"):
 
 
 def prepare_dataset(dataset, student_tokenizer, config, mode="train"):
-    """Prepare dataset by formatting and tokenizing.
+    """Prepare dataset by formatting and tokenizing using apply_chat_template.
     
     Saves train and test splits locally for future use.
+    Preserves original Question/Response fields for generation tasks.
     """
-    logger.info("Formatting dataset with FreedomIntelligence format...")
+    logger.info("Formatting dataset with FreedomIntelligence format using apply_chat_template...")
 
-    # Format dataset
+    # Format dataset with apply_chat_template
     dataset = dataset.map(lambda x: freedom_intelligence_format(x, student_tokenizer, config, mode),
                           desc="Formatting FreedomIntelligence dataset")
     logger.info("Dataset formatting complete")
